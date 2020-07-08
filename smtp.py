@@ -122,6 +122,7 @@ class AcceptRejectEvent ( Event ):
 		assert isinstance ( self._message, str )
 		return self._acceptance, self._code, self._message
 
+
 class AuthEvent ( AcceptRejectEvent ):
 	success_code = 235
 	success_message = 'Authentication successful'
@@ -132,6 +133,7 @@ class AuthEvent ( AcceptRejectEvent ):
 		super().__init__()
 		self.uid = uid
 		self.pwd = pwd
+
 
 class MailFromEvent ( AcceptRejectEvent ):
 	success_code = 250
@@ -145,6 +147,7 @@ class MailFromEvent ( AcceptRejectEvent ):
 	
 	# TODO FIXME: define custom reject_* methods for specific scenarios
 
+
 class RcptToEvent ( AcceptRejectEvent ):
 	success_code = 250
 	success_message = 'OK'
@@ -156,6 +159,7 @@ class RcptToEvent ( AcceptRejectEvent ):
 		self.rcpt_to = rcpt_to
 	
 	# TODO FIXME: define custom reject_* methods for specific scenarios
+
 
 class CompleteEvent ( AcceptRejectEvent ):
 	success_code = 250
@@ -174,6 +178,7 @@ class CompleteEvent ( AcceptRejectEvent ):
 		self.data = data
 	
 	# TODO FIXME: define custom reject_* methods for specific scenarios
+
 
 class ServerState:
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
@@ -218,57 +223,150 @@ class ServerState:
 		yield from server._respond ( 502, 'Command not implemented' )
 
 
-class ServerStateUntrusted ( ServerState ):
-	def on_AUTH ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerStateUntrusted.on_AUTH' )
-		#log.debug ( f'{command=} {textstring=}' )
-		mechanism, *extra = textstring.split ( ' ', 1 )
-		mechanism = mechanism.upper()
-		if mechanism == 'LOGIN':
-			server.state = ServerStateAuthLogin()
-			yield from server._respond ( 334, b64_encode ( 'Username:' ) )
-		if mechanism == 'PLAIN':
-			server.state = ServerStateAuthPlain()
-			if extra:
-				yield from server.state.receive_line ( server, s2b ( extra[0] ) )
-			else:
-				yield from server._respond ( 334, '' )
-		else:
-			yield from server._respond ( 504, f'Unrecognized authentication type: {mechanism}' )
+class AuthPluginStatus ( ABCMeta ):
+	@abstractmethod
+	def _resolve ( self, server: Server ) -> Iterator[Event]:
+		''' this method is used internally by the server, do not call it yourself '''
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._resolve()' )
 
-class ServerStateAuthPlain ( ServerState ):
+
+class AuthPluginStatusReply:
+	def __init__ ( self, code: int, message: str ) -> None:
+		assert isinstance ( code, int ) and 200 <= code <= 599, f'invalid {code=}'
+		assert (
+			isinstance ( message, str ) # message must be a str ( not bytes )
+			and not _r_crlf.search ( message ) # must not have \r or \n in it
+		), (
+			f'invalid {message=}'
+		)
+		self.code = code
+		self.message = message
 	
-	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
-		# see RFC 4616 section 2
-		#log = logger.getChild ( 'Server.ServerStateAuthPlain.receive_line' )
-		#log.debug ( f'{line=}' )
+	def _resolve ( self, server: Server ) -> Iterator[Event]:
+		if self.code >= 400:
+			server.state = ServerStateUntrusted()
+		yield from server._respond ( self.code, self.message )
+
+
+class AuthPluginStatusCredentials:
+	def __init__ ( self, uid: str, pwd: str ) -> None:
+		self.uid = uid
+		self.pwd = pwd
+	
+	def _resolve ( self, server: Server ) -> Iterator[Event]:
+		yield from server.on_authenticate ( self.uid, self.pwd )
+
+
+class AuthPlugin ( metaclass = ABCMeta ):
+	@abstractmethod
+	def first_line ( self, extra: str ) -> AuthPluginStatus:
+		'''
+		this method is called with any extra data when the auth method is instanciated.
+		
+		For example, if the following command were issued to the server:
+			AUTH PLAIN dGVzdAB0ZXN0ADEyMzQ=
+		then this function would get called with:
+			extra = 'dGVzdAB0ZXN0ADEyMzQ='
+		
+		If however, this command were issued:
+			AUTH PLAIN
+		then this function gets called with:
+			extra = ''
+		'''
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.first_line()' )
+	
+	@abstractmethod
+	def receive_line ( self, line: bytes ) -> AuthPluginStatus:
+		'''
+		this function gets called each time a client submits data to the server
+		while this authentication mechanism is pending
+		'''
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.receive_line()' )
+
+
+auth_plugins: Dict[str,Type[AuthPlugin]] = {}
+
+def auth_plugin ( name: str ) -> Callable[[Type[AuthPlugin]],Type[AuthPlugin]]:
+	def registrar ( cls: Type[AuthPlugin] ) -> Type[AuthPlugin]:
+		global auth_plugins
+		assert name == name.upper(), f'auth mechanisms must be upper-case, not {name!r}'
+		assert name not in auth_plugins, f'duplicate auth mechanism {name!r}'
+		auth_plugins[name] = cls
+		return cls
+	return registrar
+
+
+@auth_plugin ( 'PLAIN' )
+class AuthPlainPlugin ( AuthPlugin ):
+	def first_line ( self, extra: str ) -> AuthPluginStatus:
+		#log = logger.getChild ( 'AuthPlainPlugin.first_line' )
+		if extra:
+			return self.receive_line ( s2b ( extra ) )
+		else:
+			return AuthPluginStatusReply ( 334, '' )
+	
+	def receive_line ( self, line: bytes ) -> AuthPluginStatus:
+		log = logger.getChild ( 'AuthPlainPlugin.receive_line' )
 		try:
 			_, uid, pwd = b2s ( base64.b64decode ( line ) ).split ( '\0' )
 		except Exception as e:
 			#log.error ( f'{e=}' )
-			yield from server._respond ( 501, 'malformed auth input RFC4616#2' )
-			return
-		yield from server.on_authenticate ( uid, pwd )
+			return AuthPluginStatusReply ( 501, 'malformed auth input RFC4616#2' )
+		return AuthPluginStatusCredentials ( uid, pwd )
 
-class ServerStateAuthLogin ( ServerState ):
+
+@auth_plugin ( 'LOGIN' )
+class AuthLoginPlugin ( AuthPlugin ):
 	uid: Opt[str] = None
 	
+	def first_line ( self, extra: str ) -> AuthPluginStatus:
+		#log = logger.getChild ( 'AuthLoginPlugin.first_line' )
+		return AuthPluginStatusReply ( 334, b64_encode ( 'Username:' ) )
+	
+	def receive_line ( self, line: bytes ) -> AuthPluginStatus:
+		#log = logger.getChild ( 'AuthLoginPlugin.receive_line' )
+		if self.uid is None:
+			self.uid = b2s ( base64.b64decode ( line ) )
+			return AuthPluginStatusReply ( 334, b64_encode ( 'Password:' ) )
+		else:
+			assert isinstance ( self.uid, str )
+			uid: str = self.uid
+			pwd = b2s ( base64.b64decode ( line ) )
+			return AuthPluginStatusCredentials ( uid, pwd )
+
+
+class ServerStateUntrusted ( ServerState ):
+	def on_AUTH ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
+		#log = logger.getChild ( 'Server.ServerStateUntrusted.on_AUTH' )
+		global auth_plugins
+		mechanism, *extra = textstring.split ( ' ', 1 )
+		mechanism = mechanism.upper()
+		plugincls = auth_plugins.get ( mechanism )
+		if plugincls is None:
+			yield from server._respond ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
+		plugin = plugincls()
+		server.state = ServerStateAuth ( plugin )
+		status = plugin.first_line ( extra[0] if extra else '' )
+		yield from status._resolve ( server )
+
+
+class ServerStateAuth ( ServerState ):
+	def __init__ ( self, plugin: AuthPlugin ) -> None:
+		self.plugin = plugin
+	
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerStateAuthLogin.receive_line' )
 		try:
-			if self.uid is None:
-				self.uid = b2s ( base64.b64decode ( line ) )
-				yield from server._respond ( 334, b64_encode ( 'Password:' ) )
-				return
-			else:
-				assert isinstance ( self.uid, str )
-				uid: str = self.uid
-				pwd = b2s ( base64.b64decode ( line ) )
-		except Exception:
+			status: AuthPluginStatus = self.plugin.receive_line ( line )
+		except Exception as e:
+			log.error ( f'{e=}' )
 			server.state = ServerStateUntrusted()
 			yield from server._respond ( 501, 'malformed auth input' )
-		
-		yield from server.on_authenticate ( uid, pwd )
+		else:
+			yield from status._resolve ( server )
+
 
 r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?(.*)>?\s*$', re.I )
 r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?(.*)>?\s*$', re.I )
