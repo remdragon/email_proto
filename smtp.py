@@ -54,6 +54,9 @@ class SendDataEvent ( Event ):
 		assert isinstance ( data, bytes_types ) and len ( data ) > 0
 		self.data = data
 
+class ClosedEvent ( Event ):
+	pass
+
 class Connection ( metaclass = ABCMeta ):
 	_buf: bytes = b''
 	
@@ -61,10 +64,12 @@ class Connection ( metaclass = ABCMeta ):
 		log = logger.getChild ( 'Connection.receive' )
 		assert isinstance ( data, bytes_types ), f'invalid {data=}'
 		if not data: # EOF indicator
+			#log.debug ( f'EOF with {self._buf=}' )
 			if self._buf:
 				buf, self._buf = self._buf, b''
-				yield from self._receive_line ( self._buf )
-			raise Closed()
+				yield from self._receive_line ( buf )
+			yield ClosedEvent()
+			return
 		self._buf += data
 		start = 0
 		while ( end := ( self._buf.find ( b'\n', start ) + 1 ) ):
@@ -73,15 +78,22 @@ class Connection ( metaclass = ABCMeta ):
 			start = end
 		if start:
 			self._buf = self._buf[start:]
+			#log.debug ( f'finished with {self._buf=}' )
+		#log.debug ( f'{len(self._buf)=} {_MAXLINE=}' )
 		if len ( self._buf ) >= _MAXLINE:
 			raise ProtocolError ( 'maximum line length exceeded' )
 	
-	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
+	def _receive_line ( self, line: bytes ) -> Iterator[Event]: # pragma: no cover
 		assert False, f'{line=}'
 		yield from () # nothing to yield
 
 #endregion
 #region SERVER ----------------------------------------------------------------
+
+class ErrorEvent ( Event ):
+	def __init__ ( self, code: int, message: str ) -> None:
+		self.code = code
+		self.message = message
 
 class AcceptRejectEvent ( Event ):
 	success_code: int
@@ -95,9 +107,11 @@ class AcceptRejectEvent ( Event ):
 		self._message: Opt[str] = None
 	
 	def accept ( self ) -> None:
+		log = logger.getChild ( 'AcceptRejectEvent.accept' )
 		self._acceptance = True
 		self._code = self.success_code
 		self._message = self.success_message
+		log.debug ( f'{self._code=} {self._message=}' )
 	
 	def reject ( self, code: Opt[int] = None, message: Opt[str] = None ) -> None:
 		log = logger.getChild ( 'AcceptRejectEvent.reject' )
@@ -114,6 +128,7 @@ class AcceptRejectEvent ( Event ):
 				log.error ( f'invalid error-{message=}' )
 			else:
 				self._message = message
+		log.debug ( f'{self._code=} {self._message=}' )
 	
 	def _accepted ( self ) -> Tuple[bool,int,str]:
 		log = logger.getChild ( 'AcceptRejectEvent._accepted' )
@@ -606,8 +621,8 @@ class Client ( Connection ):
 		yield from request.send_data()
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Client._receive_line' )
-		#log.debug ( f'{line=}' )
+		log = logger.getChild ( 'Client._receive_line' )
+		log.debug ( f'{line=}' )
 		try:
 			reply_code = int ( line[:3] )
 			intermed = line[3:4]
@@ -627,122 +642,6 @@ class Client ( Connection ):
 			yield from request.on_success ( self, request.response )
 		else:
 			request.response = ErrorResponse ( reply_code, textstring )
-			raise request.response
+			yield ErrorEvent ( reply_code, textstring )
 
-#endregion
-#region EPILOGUE ---- ---------------------------------------------------------
-
-if __name__ == '__main__':
-	import trio # pip install trio trio-typing
-	
-	logging.basicConfig ( level = logging.DEBUG )
-	logging.getLogger ( '__main__.Client' ).setLevel ( logging.INFO )
-	logging.getLogger ( '__main__.Server' ).setLevel ( logging.INFO )
-	
-	async def main() -> None:
-		greeting = GreetingRequest()
-		cli = Client ( greeting )
-		srv = Server ( 'milliways.local' )
-		
-		xmit1, recv1 = trio.open_memory_channel[bytes] ( 0 )
-		xmit2, recv2 = trio.open_memory_channel[bytes] ( 0 )
-		
-		async def client_task ( recv: trio.MemoryReceiveChannel[bytes], xmit: trio.MemorySendChannel[bytes] ) -> None:
-			try:
-				log = logger.getChild ( 'main.client_task' )
-				
-				async def _event ( event: Event ) -> None:
-					if isinstance ( event, SendDataEvent ):
-						log.debug ( f'C>{b2s(event.data).rstrip()}' )
-						await xmit.send ( event.data )
-					else:
-						assert False, f'unrecognized {event=}'
-				
-				async def _recv ( request: Request ) -> Response:
-					#log = logger.getChild ( 'main.client_task._recv' )
-					while not request.response:
-						data: bytes = await recv.receive()
-						log.debug ( f'S>{b2s(data).rstrip()}' )
-						for event in cli.receive ( data ):
-							await _event ( event )
-					return request.response
-				
-				async def _send_recv ( request: Request ) -> Response:
-					#log = logger.getChlid ( 'main.client_task._send_recv' )
-					for event in cli.send ( request ):
-						await _event ( event )
-					return await _recv ( request )
-				
-				try:
-					await _recv ( greeting )
-					await _send_recv ( HeloRequest ( 'localhost' ) )
-					await _send_recv ( AuthPlain1Request ( 'Zaphod', 'Beeblebrox' ) )
-					await _send_recv ( MailFromRequest ( 'from@test.com' ) )
-					await _send_recv ( RcptToRequest ( 'to@test.com' ) )
-					await _send_recv ( DataRequest (
-						b'From: from@test.com\r\n'
-						b'To: to@test.com\r\n'
-						b'Subject: Test email\r\n'
-						b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't right...
-						b'\r\n' # a sane person would use the email module to create their email content...
-						b'This is a test. This message does not end in a period, period.\r\n'
-					) )
-					await _send_recv ( QuitRequest() )
-					
-				except ErrorResponse as e:
-					log.error ( f'server error: {e=}' )
-				except Closed as e:
-					log.debug ( f'server closed connection: {e=}' )
-			finally:
-				await recv.aclose()
-				await xmit.aclose()
-		
-		async def server_task ( xmit: trio.MemorySendChannel[bytes], recv: trio.MemoryReceiveChannel[bytes] ) -> None:
-			try:
-				log = logger.getChild ( 'main.server_task' )
-				data = srv.greeting()
-				log.debug ( f'S>{b2s(data).rstrip()}' )
-				await xmit.send ( data )
-				while True:
-					try:
-						data = await recv.receive()
-					except trio.EndOfChannel:
-						raise Closed()
-					log.debug ( f'C>{b2s(data).rstrip()}' )
-					for event in srv.receive ( data ):
-						if isinstance ( event, SendDataEvent ): # this will be the most common event...
-							log.debug ( f'S>{b2s(data).rstrip()}' )
-							await xmit.send ( event.data )
-						elif isinstance ( event, RcptToEvent ): # 2nd most common event
-							log.debug ( f'{event.rcpt_to=}' )
-							event.accept() # or .reject()
-						elif isinstance ( event, MailFromEvent ):
-							log.debug ( f'{event.mail_from=}' )
-							event.accept() # or .reject()
-						elif isinstance ( event, AuthEvent ):
-							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
-								event.accept()
-							else:
-								event.reject()
-						elif isinstance ( event, CompleteEvent ):
-							print ( f'MAIL FROM: {event.mail_from}' )
-							for rcpt_to in event.rcpt_to:
-								print ( f'RCPT TO: {rcpt_to}' )
-							print ( '-' * 20 )
-							for line in event.data:
-								print ( b2s ( line ) )
-							event.accept() # or .reject()
-						else:
-							assert False, f'unrecognized {event=}'
-			except Closed:
-				pass
-			finally:
-				await xmit.aclose()
-				await recv.aclose()
-		
-		async with trio.open_nursery() as nursery:
-			nursery.start_soon ( client_task, recv1, xmit2 )
-			nursery.start_soon ( server_task, xmit1, recv2 )
-	
-	trio.run ( main )
 #endregion

@@ -9,7 +9,7 @@ import unittest
 
 import importlib.util
 def imp_load_source ( module_name, path ):
-	print ( f'loading {path!r}' )
+	#print ( f'loading {path!r}' )
 	spec = importlib.util.spec_from_file_location ( module_name, path )
 	module = importlib.util.module_from_spec ( spec )
 	spec.loader.exec_module ( module )

@@ -67,7 +67,7 @@ class PipeStreamReader:
 			try:
 				data = self._event.get_data ( maxlen or None )
 			except EOFError:
-				raise IncompleteReadError ( partial = b''.join ( datas ) or None ) from None
+				raise asyncio.IncompleteReadError ( partial = b''.join ( datas ) or None ) from None
 			if not data:
 				self._event = await self.q.get()
 				continue

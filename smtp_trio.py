@@ -59,6 +59,10 @@ class Client:
 		if isinstance ( event, smtp.SendDataEvent ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			await self.stream.send_all ( event.data )
+		elif isinstance ( event, smtp.ErrorEvent ):
+			raise smtp.ErrorResponse ( event.code, event.message )
+		elif isinstance ( event, smtp.ClosedEvent ):
+			raise smtp.Closed()
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -135,6 +139,10 @@ class Server ( metaclass = ABCMeta ):
 						await self.on_mail_from ( event )
 					elif isinstance ( event, smtp.CompleteEvent ):
 						await self.on_complete ( event )
+					elif isinstance ( event, smtp.ErrorEvent ):
+						raise smtp.ErrorResponse ( event.code, event.message )
+					elif isinstance ( event, smtp.ClosedEvent ):
+						raise smtp.Closed()
 					else:
 						assert False, f'unrecognized {event=}'
 		except smtp.Closed:

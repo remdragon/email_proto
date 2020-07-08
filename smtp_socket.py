@@ -63,6 +63,10 @@ class Client:
 		if isinstance ( event, smtp.SendDataEvent ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			self.sock.sendall ( event.data )
+		elif isinstance ( event, smtp.ErrorEvent ):
+			raise smtp.ErrorEvent ( event.code, event.message )
+		elif isinstance ( event, smtp.ClosedEvent ):
+			raise smtp.Closed()
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -139,91 +143,13 @@ class Server ( metaclass = ABCMeta ):
 						self.on_mail_from ( event )
 					elif isinstance ( event, smtp.CompleteEvent ):
 						self.on_complete ( event )
+					elif isinstance ( event, smtp.ErrorEvent ):
+						raise smtp.ErrorEvent ( event.code, event.message )
+					elif isinstance ( event, smtp.ClosedEvent ):
+						raise smtp.Closed()
 					else:
 						assert False, f'unrecognized {event=}'
 		except smtp.Closed:
 			pass
 		finally:
 			sock.close()
-
-if __name__ == '__main__':
-	import sys
-	import threading
-	
-	logging.basicConfig ( level = logging.DEBUG )
-	
-	def main() -> int:
-		
-		thing1, thing2 = socket.socketpair()
-		
-		def client_task ( sock: socket.socket ) -> None:
-			log = logger.getChild ( 'main.client_task' )
-			try:
-				cli = Client()
-				
-				cli._connect ( sock )
-				cli.helo ( 'localhost' )
-				cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' )
-				cli.mail_from ( 'from@test.com' )
-				cli.rcpt_to ( 'to@test.com' )
-				cli.data (
-					b'From: from@test.com\r\n'
-					b'To: to@test.com\r\n'
-					b'Subject: Test email\r\n'
-					b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
-					b'\r\n' # a sane person would use the email module to create their email content...
-					b'This is a test. This message does not end in a period, period.\r\n'
-				)
-				cli.quit()
-			
-			except smtp.ErrorResponse as e:
-				log.error ( f'server error: {e=}' )
-			except smtp.Closed as e:
-				log.debug ( f'server closed connection: {e=}' )
-			finally:
-				sock.close()
-		
-		def server_task ( sock: socket.socket ) -> None:
-			log = logger.getChild ( 'main.server_task' )
-			try:
-				class TestServer ( Server ):
-					def on_authenticate ( self, event: smtp.AuthEvent ) -> None:
-						if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
-							event.accept()
-						else:
-							event.reject()
-					
-					def on_mail_from ( self, event: smtp.MailFromEvent ) -> None:
-						event.accept() # or .reject()
-					
-					def on_rcpt_to ( self, event: smtp.RcptToEvent ) -> None:
-						event.accept() # or .reject()
-					
-					def on_complete ( self, event: smtp.CompleteEvent ) -> None:
-						print ( f'MAIL FROM: {event.mail_from}' )
-						for rcpt_to in event.rcpt_to:
-							print ( f'RCPT TO: {rcpt_to}' )
-						print ( '-' * 20 )
-						print ( b2s ( b''.join ( event.data ) ) )
-						event.accept() # or .reject()
-				
-				srv = TestServer ( 'milliways.local' )
-				
-				srv.run ( sock )
-			except smtp.Closed:
-				pass
-			finally:
-				sock.close()
-		
-		thread1 = threading.Thread ( target = client_task, args = ( thing1, ) )
-		thread2 = threading.Thread ( target = server_task, args = ( thing2, ) )
-		
-		thread1.start()
-		thread2.start()
-		
-		thread1.join()
-		thread2.join()
-		
-		return 7
-	
-	sys.exit ( main() )

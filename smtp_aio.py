@@ -60,6 +60,10 @@ class Client:
 		if isinstance ( event, smtp.SendDataEvent ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			self.tx.write ( event.data ); await self.tx.drain()
+		elif isinstance ( event, smtp.ErrorEvent ):
+			raise smtp.ErrorEvent ( event.code, event.message )
+		elif isinstance ( event, smtp.ClosedEvent ):
+			raise smtp.Closed()
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -139,90 +143,13 @@ class Server ( metaclass = ABCMeta ):
 						await self.on_mail_from ( event )
 					elif isinstance ( event, smtp.CompleteEvent ):
 						await self.on_complete ( event )
+					elif isinstance ( event, smtp.ErrorEvent ):
+						raise smtp.ErrorEvent ( event.code, event.message )
+					elif isinstance ( event, smtp.ClosedEvent ):
+						raise smtp.Closed()
 					else:
 						assert False, f'unrecognized {event=}'
 		except smtp.Closed:
 			pass
 		finally:
 			tx.close()
-
-if __name__ == '__main__':
-	logging.basicConfig ( level = logging.DEBUG )
-	
-	if __package__ is None:
-		from _aiotesting import open_pipe_stream
-	else:
-		from ._aiotesting import open_pipe_stream
-	
-	async def main() -> None:
-		
-		# TODO FIXME: apparently socket.socketpair() does work on Windows, use that instead of _aiotesting.open_pipe_stream()
-		rx1, tx1 = open_pipe_stream()
-		rx2, tx2 = open_pipe_stream()
-		
-		async def client_task ( rx: asyncio.StreamReader, tx: asyncio.StreamWriter ) -> None:
-			log = logger.getChild ( 'main.client_task' )
-			try:
-				cli = Client()
-				
-				await cli._connect ( rx, tx )
-				await cli.helo ( 'localhost' )
-				await cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' )
-				await cli.mail_from ( 'from@test.com' )
-				await cli.rcpt_to ( 'to@test.com' )
-				await cli.data (
-					b'From: from@test.com\r\n'
-					b'To: to@test.com\r\n'
-					b'Subject: Test email\r\n'
-					b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
-					b'\r\n' # a sane person would use the email module to create their email content...
-					b'This is a test. This message does not end in a period, period.\r\n'
-				)
-				await cli.quit()
-			
-			except smtp.ErrorResponse as e:
-				log.error ( f'server error: {e=}' )
-			except smtp.Closed as e:
-				log.debug ( f'server closed connection: {e=}' )
-			finally:
-				tx.close()
-		
-		async def server_task ( rx: asyncio.StreamReader, tx: asyncio.StreamWriter ) -> None:
-			log = logger.getChild ( 'main.server_task' )
-			try:
-				class TestServer ( Server ):
-					async def on_authenticate ( self, event: smtp.AuthEvent ) -> None:
-						if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
-							event.accept()
-						else:
-							event.reject()
-					
-					async def on_mail_from ( self, event: smtp.MailFromEvent ) -> None:
-						event.accept() # or .reject()
-					
-					async def on_rcpt_to ( self, event: smtp.RcptToEvent ) -> None:
-						event.accept() # or .reject()
-					
-					async def on_complete ( self, event: smtp.CompleteEvent ) -> None:
-						print ( f'MAIL FROM: {event.mail_from}' )
-						for rcpt_to in event.rcpt_to:
-							print ( f'RCPT TO: {rcpt_to}' )
-						print ( '-' * 20 )
-						print ( b2s ( b''.join ( event.data ) ) )
-						event.accept() # or .reject()
-				
-				srv = TestServer ( 'milliways.local' )
-				
-				await srv.run ( rx, tx )
-			except smtp.Closed:
-				pass
-			finally:
-				tx.close()
-		
-		task1 = asyncio.create_task ( client_task ( rx1, tx2 ) )
-		task2 = asyncio.create_task ( server_task ( rx2, tx1 ) )
-		
-		await task1
-		await task2
-	
-	asyncio.run ( main() )

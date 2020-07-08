@@ -1,32 +1,36 @@
 # system imports:
 from abc import ABCMeta, abstractmethod
+import asyncio
 import logging
-import trio # pip install trio trio-typing
-import trio.testing
 import unittest
 
 # mail_proto imports:
+if not __package__:
+	from _aiotesting import open_pipe_stream
+else:
+	from ._aiotesting import open_pipe_stream
 import smtp
-import smtp_trio
+import smtp_aio
 
 logger = logging.getLogger ( __name__ )
 
 b2s = smtp.b2s
 
 class Tests ( unittest.TestCase ):
-	def test_auth_plain1 ( self ) -> None:
+	def test_auth_plain1 ( self ):
 		async def _test() -> None:
-			thing1, thing2 = trio.testing.lockstep_stream_pair()
 			
-			async def client_task ( stream: trio.abc.Stream ) -> None:
+			# TODO FIXME: apparently socket.socketpair() does work on Windows, use that instead of _aiotesting.open_pipe_stream()
+			rx1, tx1 = open_pipe_stream()
+			rx2, tx2 = open_pipe_stream()
+			
+			async def client_task ( rx: asyncio.StreamReader, tx: asyncio.StreamWriter ) -> None:
 				log = logger.getChild ( 'main.client_task' )
 				try:
-					cli = smtp_trio.Client()
+					cli = smtp_aio.Client()
 					
-					await cli._connect ( stream )
+					await cli._connect ( rx, tx )
 					await cli.helo ( 'localhost' )
-					with self.assertRaises ( smtp.ErrorResponse ):
-						await cli.auth_plain1 ( 'Ford', 'Prefect' )
 					await cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' )
 					await cli.mail_from ( 'from@test.com' )
 					await cli.rcpt_to ( 'to@test.com' )
@@ -41,18 +45,17 @@ class Tests ( unittest.TestCase ):
 					await cli.quit()
 				
 				except smtp.ErrorResponse as e: # pragma: no cover
-					log.exception ( f'server error: {e=}' )
+					log.error ( f'server error: {e=}' )
 				except smtp.Closed as e: # pragma: no cover
 					log.debug ( f'server closed connection: {e=}' )
 				finally:
-					await stream.aclose()
+					tx.close()
 			
-			async def server_task ( stream: trio.abc.Stream ) -> None:
+			async def server_task ( rx: asyncio.StreamReader, tx: asyncio.StreamWriter ) -> None:
 				log = logger.getChild ( 'main.server_task' )
 				try:
-					class TestServer ( smtp_trio.Server ):
+					class TestServer ( smtp_aio.Server ):
 						async def on_authenticate ( self, event: smtp.AuthEvent ) -> None:
-							log.debug ( f'{event.uid=} {event.pwd=}' )
 							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
 								event.accept()
 							else:
@@ -74,20 +77,21 @@ class Tests ( unittest.TestCase ):
 					
 					srv = TestServer ( 'milliways.local' )
 					
-					await srv.run ( stream )
+					await srv.run ( rx, tx )
 				except smtp.Closed:
 					pass
 				finally:
-					await stream.aclose()
+					tx.close()
 			
-			async with trio.open_nursery() as nursery:
-				nursery.start_soon ( client_task, thing1 )
-				nursery.start_soon ( server_task, thing2 )
+			task1 = asyncio.create_task ( client_task ( rx1, tx2 ) )
+			task2 = asyncio.create_task ( server_task ( rx2, tx1 ) )
+			
+			await task1
+			await task2
 		
-		trio.run ( _test )
+		asyncio.run ( _test() )
+
 
 if __name__ == '__main__':
-	logging.basicConfig (
-		level = logging.DEBUG,
-	)
+	logging.basicConfig ( level = logging.DEBUG )
 	unittest.main()
