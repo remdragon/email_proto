@@ -156,6 +156,7 @@ if __name__ == '__main__':
 	
 	async def main() -> None:
 		
+		# TODO FIXME: apparently socket.socketpair() does work on Windows, use that instead of _aiotesting.open_pipe_stream()
 		rx1, tx1 = open_pipe_stream()
 		rx2, tx2 = open_pipe_stream()
 		
@@ -173,7 +174,7 @@ if __name__ == '__main__':
 					b'From: from@test.com\r\n'
 					b'To: to@test.com\r\n'
 					b'Subject: Test email\r\n'
-					b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't right...
+					b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
 					b'\r\n' # a sane person would use the email module to create their email content...
 					b'This is a test. This message does not end in a period, period.\r\n'
 				)

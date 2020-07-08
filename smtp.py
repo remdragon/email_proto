@@ -177,8 +177,8 @@ class CompleteEvent ( AcceptRejectEvent ):
 
 class ServerState:
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
-		log = logger.getChild ( 'Server.ServerState.receive_line' )
-		log.debug ( f'{line=}' )
+		#log = logger.getChild ( 'Server.ServerState.receive_line' )
+		#log.debug ( f'{line=}' )
 		text = b2s ( line )
 		if ' ' in text:
 			command, textstring = map ( str.rstrip, text.split ( ' ', 1 ) )
@@ -188,18 +188,21 @@ class ServerState:
 		try:
 			f = getattr ( self, fname )
 		except AttributeError:
-			log.debug ( f'{type(self).__module__}.{type(self).__name__} has no {fname}' )
+			#log.debug ( f'{type(self).__module__}.{type(self).__name__} has no {fname}' )
 			yield from server._respond ( 500, f'command not recognized or not available: {command}' )
 		else:
-			log.debug ( f'calling {f=}' )
+			#log.debug ( f'calling {f=}' )
 			yield from f ( server, command, textstring )
+	
+	def on_EHLO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
+		yield from server._respond ( 502, 'TODO FIXME: Command not implemented' )
 	
 	def on_EXPN ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		yield from server._respond ( 502, 'Command not implemented' )
 	
 	def on_HELO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
+		# TODO FIXME: this is not correct, supposed to give a 503 if HELO/EHLO already requested, see RFC1869#4.2
 		yield from server._respond ( 250, server.hostname )
-		#yield ErrorResponse ( 400, 'you already said that' )
 	
 	def on_NOOP ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		yield from server._respond ( 250, 'OK' )
@@ -216,16 +219,9 @@ class ServerState:
 
 
 class ServerStateUntrusted ( ServerState ):
-	def on_HELO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		server.state = ServerStateUntrusted()
-		yield from server._respond ( 250, server.hostname )
-	
-	def on_EHLO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 502, 'TODO FIXME: Command not implemented' )
-	
 	def on_AUTH ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		log = logger.getChild ( 'Server.ServerStateUntrusted.on_AUTH' )
-		log.debug ( f'{command=} {textstring=}' )
+		#log = logger.getChild ( 'Server.ServerStateUntrusted.on_AUTH' )
+		#log.debug ( f'{command=} {textstring=}' )
 		mechanism, *extra = textstring.split ( ' ', 1 )
 		mechanism = mechanism.upper()
 		if mechanism == 'LOGIN':
@@ -244,7 +240,7 @@ class ServerStateAuthPlain ( ServerState ):
 	
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
 		# see RFC 4616 section 2
-		log = logger.getChild ( 'Server.ServerStateAuthPlain.receive_line' )
+		#log = logger.getChild ( 'Server.ServerStateAuthPlain.receive_line' )
 		#log.debug ( f'{line=}' )
 		try:
 			_, uid, pwd = b2s ( base64.b64decode ( line ) ).split ( '\0' )
@@ -258,7 +254,7 @@ class ServerStateAuthLogin ( ServerState ):
 	uid: Opt[str] = None
 	
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
-		log = logger.getChild ( 'Server.ServerStateAuthLogin.receive_line' )
+		#log = logger.getChild ( 'Server.ServerStateAuthLogin.receive_line' )
 		try:
 			if self.uid is None:
 				self.uid = b2s ( base64.b64decode ( line ) )
@@ -283,8 +279,8 @@ class ServerStateTrusted ( ServerState ):
 		yield from server._respond ( 250, server.hostname )
 	
 	def on_MAIL ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		log = logger.getChild ( 'Server.ServerStateTrusted.on_MAIL' )
-		log.debug ( f'{command=} {textstring=}' )
+		#log = logger.getChild ( 'Server.ServerStateTrusted.on_MAIL' )
+		#log.debug ( f'{command=} {textstring=}' )
 		m = r_mail_from.match ( textstring )
 		if not m:
 			yield from server._respond ( 501, 'malformed MAIL input' )
@@ -293,8 +289,8 @@ class ServerStateTrusted ( ServerState ):
 			yield from server.on_mail_from ( mail_from )
 	
 	def on_RCPT ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		log = logger.getChild ( 'Server.ServerStateTrusted.on_RCPT' )
-		log.debug ( f'{command=} {textstring=}' )
+		#log = logger.getChild ( 'Server.ServerStateTrusted.on_RCPT' )
+		#log.debug ( f'{command=} {textstring=}' )
 		m = r_rcpt_to.match ( textstring )
 		if not m:
 			yield from server._respond ( 501, 'malformed RCPT input' )
@@ -303,8 +299,8 @@ class ServerStateTrusted ( ServerState ):
 			yield from server.on_rcpt_to ( rcpt_to )
 	
 	def on_DATA ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		log = logger.getChild ( 'Server.ServerStateTrusted.on_DATA' )
-		log.debug ( f'{command=} {textstring=}' )
+		#log = logger.getChild ( 'Server.ServerStateTrusted.on_DATA' )
+		#log.debug ( f'{command=} {textstring=}' )
 		if not server.mail_from:
 			yield from server._respond ( 503, 'no from address received yet' )
 		elif not server.rcpt_to:
@@ -505,15 +501,15 @@ class Client ( Connection ):
 		#self.state: ClientState = ServerSpeaksFirstState()
 	
 	def send ( self, request: Request ) -> Iterator[Event]:
-		log = logger.getChild ( 'Client.send' )
+		#log = logger.getChild ( 'Client.send' )
 		assert self.request is None, f'trying to send {request=} but not finished processing {self.request=}'
 		self.request = request
-		log.debug ( f'setting {self.request=}' )
+		#log.debug ( f'setting {self.request=}' )
 		yield from request.send_data()
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
-		log = logger.getChild ( 'Client._receive_line' )
-		log.debug ( f'{line=}' )
+		#log = logger.getChild ( 'Client._receive_line' )
+		#log.debug ( f'{line=}' )
 		try:
 			reply_code = int ( line[:3] )
 			intermed = line[3:4]
@@ -524,12 +520,12 @@ class Client ( Connection ):
 			raise Closed ( f'invalid response: {e=}' ) from e
 		intermediate = ( intermed == b'-' )
 		
-		log.debug ( f'clearing {self.request=}' )
+		#log.debug ( f'clearing {self.request=}' )
 		request, self.request = self.request, None
 		assert isinstance ( request, Request )
 		if reply_code < 400:
 			request.response = Response ( reply_code, textstring )
-			log.debug ( f'calling {request=}.on_success()' )
+			#log.debug ( f'calling {request=}.on_success()' )
 			yield from request.on_success ( self, request.response )
 		else:
 			request.response = ErrorResponse ( reply_code, textstring )
