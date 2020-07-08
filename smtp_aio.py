@@ -62,8 +62,6 @@ class Client:
 			self.tx.write ( event.data ); await self.tx.drain()
 		elif isinstance ( event, smtp.ErrorEvent ):
 			raise smtp.ErrorEvent ( event.code, event.message )
-		elif isinstance ( event, smtp.ClosedEvent ):
-			raise smtp.Closed()
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -145,8 +143,6 @@ class Server ( metaclass = ABCMeta ):
 						await self.on_complete ( event )
 					elif isinstance ( event, smtp.ErrorEvent ):
 						raise smtp.ErrorEvent ( event.code, event.message )
-					elif isinstance ( event, smtp.ClosedEvent ):
-						raise smtp.Closed()
 					else:
 						assert False, f'unrecognized {event=}'
 		except smtp.Closed:

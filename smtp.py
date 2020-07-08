@@ -54,9 +54,6 @@ class SendDataEvent ( Event ):
 		assert isinstance ( data, bytes_types ) and len ( data ) > 0
 		self.data = data
 
-class ClosedEvent ( Event ):
-	pass
-
 class Connection ( metaclass = ABCMeta ):
 	_buf: bytes = b''
 	
@@ -64,28 +61,31 @@ class Connection ( metaclass = ABCMeta ):
 		log = logger.getChild ( 'Connection.receive' )
 		assert isinstance ( data, bytes_types ), f'invalid {data=}'
 		if not data: # EOF indicator
-			#log.debug ( f'EOF with {self._buf=}' )
 			if self._buf:
 				buf, self._buf = self._buf, b''
 				yield from self._receive_line ( buf )
-			yield ClosedEvent()
-			return
+				return
+			raise Closed()
 		self._buf += data
 		start = 0
 		while ( end := ( self._buf.find ( b'\n', start ) + 1 ) ):
 			line = self._buf[start:end]
-			yield from self._receive_line ( line )
+			try:
+				yield from self._receive_line ( line )
+			except:
+				# we normally wait until yielding all events, but exceptions abort our loop, so clean up now:
+				self._buf = self._buf[end:]
+				raise
 			start = end
 		if start:
 			self._buf = self._buf[start:]
-			#log.debug ( f'finished with {self._buf=}' )
-		#log.debug ( f'{len(self._buf)=} {_MAXLINE=}' )
 		if len ( self._buf ) >= _MAXLINE:
 			raise ProtocolError ( 'maximum line length exceeded' )
 	
+	@abstractmethod
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]: # pragma: no cover
-		assert False, f'{line=}'
-		yield from () # nothing to yield
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._receive_line()' )
 
 #endregion
 #region SERVER ----------------------------------------------------------------
@@ -107,11 +107,10 @@ class AcceptRejectEvent ( Event ):
 		self._message: Opt[str] = None
 	
 	def accept ( self ) -> None:
-		log = logger.getChild ( 'AcceptRejectEvent.accept' )
+		#log = logger.getChild ( 'AcceptRejectEvent.accept' )
 		self._acceptance = True
 		self._code = self.success_code
 		self._message = self.success_message
-		log.debug ( f'{self._code=} {self._message=}' )
 	
 	def reject ( self, code: Opt[int] = None, message: Opt[str] = None ) -> None:
 		log = logger.getChild ( 'AcceptRejectEvent.reject' )
@@ -128,7 +127,6 @@ class AcceptRejectEvent ( Event ):
 				log.error ( f'invalid error-{message=}' )
 			else:
 				self._message = message
-		log.debug ( f'{self._code=} {self._message=}' )
 	
 	def _accepted ( self ) -> Tuple[bool,int,str]:
 		log = logger.getChild ( 'AcceptRejectEvent._accepted' )
@@ -621,8 +619,7 @@ class Client ( Connection ):
 		yield from request.send_data()
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
-		log = logger.getChild ( 'Client._receive_line' )
-		log.debug ( f'{line=}' )
+		#log = logger.getChild ( 'Client._receive_line' )
 		try:
 			reply_code = int ( line[:3] )
 			intermed = line[3:4]

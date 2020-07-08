@@ -35,13 +35,12 @@ class Tests ( unittest.TestCase ):
 		self.assertEqual ( evts, [
 			b'baar\r\n',
 		] )
-		evts = list ( conn.receive ( b'' ) )
-		self.assertEqual ( len ( evts ), 2 )
-		evt0 = evts[0]
-		evt1 = evts[1]
-		self.assertTrue ( isinstance ( evt0, smtp.SendDataEvent ), f'invalid {evt0=}' )
-		self.assertEqual ( evt0.data, b'baz' )
-		self.assertTrue ( isinstance ( evt1, smtp.ClosedEvent ), f'invalid {evt1=}' )
+		evts = [ evt.data for evt in conn.receive ( b'' ) ]
+		self.assertEqual ( evts, [
+			b'baz',
+		] )
+		with self.assertRaises ( smtp.Closed ):
+			evts = list ( conn.receive ( b'' ) )
 		
 		conn = TestConnection()
 		with self.assertRaises ( smtp.ProtocolError ):

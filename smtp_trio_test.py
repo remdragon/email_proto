@@ -52,7 +52,6 @@ class Tests ( unittest.TestCase ):
 				try:
 					class TestServer ( smtp_trio.Server ):
 						async def on_authenticate ( self, event: smtp.AuthEvent ) -> None:
-							log.debug ( f'{event.uid=} {event.pwd=}' )
 							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
 								event.accept()
 							else:
