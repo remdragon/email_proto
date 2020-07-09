@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABCMeta, abstractmethod
 import asyncio
 import logging
@@ -7,7 +9,7 @@ logger = logging.getLogger ( __name__ )
 
 class _Event ( metaclass = ABCMeta ):
 	@abstractmethod
-	def get_data ( self, limit: Opt[int] = None ) -> bytes:
+	def get_data ( self, limit: Opt[int] = None ) -> bytes: # pragma: no cover
 		raise NotImplementedError
 
 class _DataEvent ( _Event ):
@@ -29,7 +31,7 @@ class _CloseEvent ( _Event ):
 class PipeStreamReader:
 	_event: _Event
 	
-	def __init__ ( self, q: asyncio.Queue ) -> None:
+	def __init__ ( self, q: asyncio.Queue[_Event] ) -> None:
 		self.q = q
 		self._event = _DataEvent ( b'' ) # start with an empty event so logic is simpler below...
 	
@@ -48,7 +50,7 @@ class PipeStreamReader:
 				self._event = await self.q.get()
 				continue
 			count += len ( data )
-			datas.append ( b )
+			datas.append ( data )
 		return b''.join ( datas )
 	
 	async def readline ( self, maxlen: int = 0 ) -> bytes:
@@ -67,7 +69,10 @@ class PipeStreamReader:
 			try:
 				data = self._event.get_data ( maxlen or None )
 			except EOFError:
-				raise asyncio.IncompleteReadError ( partial = b''.join ( datas ) or None ) from None
+				raise asyncio.IncompleteReadError (
+					b''.join ( datas ),
+					f'(terminated by {separator!r})' # type: ignore
+				) from None
 			if not data:
 				self._event = await self.q.get()
 				continue
@@ -85,7 +90,7 @@ class PipeStreamWriter:
 	_buf: List[_Event]
 	_is_closing: bool
 	
-	def __init__ ( self, q: asyncio.Queue ) -> None:
+	def __init__ ( self, q: asyncio.Queue[_Event] ) -> None:
 		self.q = q
 		self._buf = []
 		self._is_closing = False
@@ -124,10 +129,10 @@ class PipeStreamWriter:
 	async def wait_closed ( self ) -> None:
 		for event in self._buf:
 			self.q.put ( event )
-		self._buf = None
+		del self._buf
 
 def open_pipe_stream() -> Tuple[asyncio.StreamReader,asyncio.StreamWriter]:
-	q = asyncio.Queue()
+	q: asyncio.Queue[_Event] = asyncio.Queue()
 	rx = PipeStreamReader ( q )
 	tx = PipeStreamWriter ( q )
 	return rx, tx # type: ignore # yes I know they aren't *real* StreamReader/StreamWriter objects

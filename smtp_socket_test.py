@@ -14,7 +14,7 @@ logger = logging.getLogger ( __name__ )
 b2s = smtp.b2s
 
 class Tests ( unittest.TestCase ):
-	def test_auth_plain1 ( self ):
+	def test_auth_plain1 ( self ) -> None:
 		thing1, thing2 = socket.socketpair()
 		
 		def client_task ( sock: socket.socket ) -> None:
@@ -22,7 +22,8 @@ class Tests ( unittest.TestCase ):
 			try:
 				cli = smtp_socket.Client()
 				
-				cli._connect ( sock )
+				cli.sock = sock
+				cli._connect()
 				cli.helo ( 'localhost' )
 				cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' )
 				cli.mail_from ( 'from@test.com' )
@@ -84,8 +85,6 @@ class Tests ( unittest.TestCase ):
 		
 		thread1.join()
 		thread2.join()
-		
-		return 7
 
 if __name__ == '__main__':
 	logging.basicConfig ( level = logging.DEBUG )

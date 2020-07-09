@@ -6,7 +6,8 @@ import base64
 import logging
 import re
 from typing import (
-	Callable, Iterator, List, Optional as Opt, Sequence as Seq, Tuple, Union,
+	Callable, Dict, Iterator, List, Optional as Opt, Sequence as Seq, Tuple,
+	Type, Union,
 )
 
 logger = logging.getLogger ( __name__ )
@@ -16,6 +17,10 @@ BYTES = Union[bytes,bytearray]
 bytes_types = ( bytes, bytearray )
 ENCODING = 'us-ascii'
 ERRORS = 'strict'
+
+_r_eol = re.compile ( r'[\r\n]' )
+_r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?([^>]*)>?\s*$', re.I )
+_r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?([^>]*)>?\s*$', re.I )
 
 #endregion
 #region COMMON ----------------------------------------------------------------
@@ -53,6 +58,10 @@ class SendDataEvent ( Event ):
 	def __init__ ( self, data: bytes ) -> None:
 		assert isinstance ( data, bytes_types ) and len ( data ) > 0
 		self.data = data
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(data={self.data!r})'
 
 class Connection ( metaclass = ABCMeta ):
 	_buf: bytes = b''
@@ -94,6 +103,10 @@ class ErrorEvent ( Event ):
 	def __init__ ( self, code: int, message: str ) -> None:
 		self.code = code
 		self.message = message
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(code={self.code!r}, message={self.message!r})'
 
 class AcceptRejectEvent ( Event ):
 	success_code: int
@@ -134,6 +147,15 @@ class AcceptRejectEvent ( Event ):
 		assert isinstance ( self._code, int )
 		assert isinstance ( self._message, str )
 		return self._acceptance, self._code, self._message
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		args = ', '.join ( f'{k}={getattr(self,k)!r}' for k in (
+			'_acceptance',
+			'_code',
+			'_message',
+		) )
+		return f'{cls.__module__}.{cls.__name__}({args})'
 
 
 class AuthEvent ( AcceptRejectEvent ):
@@ -146,6 +168,10 @@ class AuthEvent ( AcceptRejectEvent ):
 		super().__init__()
 		self.uid = uid
 		self.pwd = pwd
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(uid={self.uid!r})'
 
 
 class MailFromEvent ( AcceptRejectEvent ):
@@ -159,6 +185,10 @@ class MailFromEvent ( AcceptRejectEvent ):
 		self.mail_from = mail_from
 	
 	# TODO FIXME: define custom reject_* methods for specific scenarios
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(mail_from={self.mail_from!r})'
 
 
 class RcptToEvent ( AcceptRejectEvent ):
@@ -172,6 +202,10 @@ class RcptToEvent ( AcceptRejectEvent ):
 		self.rcpt_to = rcpt_to
 	
 	# TODO FIXME: define custom reject_* methods for specific scenarios
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(rcpt_to={self.rcpt_to!r})'
 
 
 class CompleteEvent ( AcceptRejectEvent ):
@@ -216,7 +250,9 @@ class ServerState:
 		yield from server._respond ( 502, 'TODO FIXME: Command not implemented' )
 	
 	def on_EXPN ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 502, 'Command not implemented' )
+		log = logger.getChild ( 'ServerState.on_EXPN' )
+		log.debug ( f'{command=} {textstring=}' )
+		yield from server._respond ( 550, 'Access Denied!' )
 	
 	def on_HELO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		# TODO FIXME: this is not correct, supposed to give a 503 if HELO/EHLO already requested, see RFC1869#4.2
@@ -233,10 +269,10 @@ class ServerState:
 		yield from server._respond ( 250, 'OK' )
 	
 	def on_VRFY ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 502, 'Command not implemented' )
+		yield from server._respond ( 550, 'Access Denied!' )
 
 
-class AuthPluginStatus ( ABCMeta ):
+class AuthPluginStatus ( metaclass = ABCMeta ):
 	@abstractmethod
 	def _resolve ( self, server: Server ) -> Iterator[Event]:
 		''' this method is used internally by the server, do not call it yourself '''
@@ -244,12 +280,12 @@ class AuthPluginStatus ( ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._resolve()' )
 
 
-class AuthPluginStatusReply:
+class AuthPluginStatus_Reply ( AuthPluginStatus ):
 	def __init__ ( self, code: int, message: str ) -> None:
 		assert isinstance ( code, int ) and 200 <= code <= 599, f'invalid {code=}'
 		assert (
 			isinstance ( message, str ) # message must be a str ( not bytes )
-			and not _r_crlf.search ( message ) # must not have \r or \n in it
+			and not _r_eol.search ( message ) # must not have \r or \n in it
 		), (
 			f'invalid {message=}'
 		)
@@ -258,11 +294,11 @@ class AuthPluginStatusReply:
 	
 	def _resolve ( self, server: Server ) -> Iterator[Event]:
 		if self.code >= 400:
-			server.state = ServerStateUntrusted()
+			server.state = ServerState_Untrusted()
 		yield from server._respond ( self.code, self.message )
 
 
-class AuthPluginStatusCredentials:
+class AuthPluginStatus_Credentials ( AuthPluginStatus ):
 	def __init__ ( self, uid: str, pwd: str ) -> None:
 		self.uid = uid
 		self.pwd = pwd
@@ -313,86 +349,85 @@ def auth_plugin ( name: str ) -> Callable[[Type[AuthPlugin]],Type[AuthPlugin]]:
 
 
 @auth_plugin ( 'PLAIN' )
-class AuthPlainPlugin ( AuthPlugin ):
+class AuthPlugin_Plain ( AuthPlugin ):
 	def first_line ( self, extra: str ) -> AuthPluginStatus:
-		#log = logger.getChild ( 'AuthPlainPlugin.first_line' )
+		#log = logger.getChild ( 'AuthPlugin_Plain.first_line' )
 		if extra:
 			return self.receive_line ( s2b ( extra ) )
 		else:
-			return AuthPluginStatusReply ( 334, '' )
+			return AuthPluginStatus_Reply ( 334, '' )
 	
 	def receive_line ( self, line: bytes ) -> AuthPluginStatus:
-		log = logger.getChild ( 'AuthPlainPlugin.receive_line' )
+		log = logger.getChild ( 'AuthPlugin_Plain.receive_line' )
 		try:
 			_, uid, pwd = b2s ( base64.b64decode ( line ) ).split ( '\0' )
 		except Exception as e:
 			#log.error ( f'{e=}' )
-			return AuthPluginStatusReply ( 501, 'malformed auth input RFC4616#2' )
-		return AuthPluginStatusCredentials ( uid, pwd )
+			return AuthPluginStatus_Reply ( 501, 'malformed auth input RFC4616#2' )
+		return AuthPluginStatus_Credentials ( uid, pwd )
 
 
 @auth_plugin ( 'LOGIN' )
-class AuthLoginPlugin ( AuthPlugin ):
+class AuthPlugin_Login ( AuthPlugin ):
 	uid: Opt[str] = None
 	
 	def first_line ( self, extra: str ) -> AuthPluginStatus:
-		#log = logger.getChild ( 'AuthLoginPlugin.first_line' )
-		return AuthPluginStatusReply ( 334, b64_encode ( 'Username:' ) )
+		#log = logger.getChild ( 'AuthPlugin_Login.first_line' )
+		return AuthPluginStatus_Reply ( 334, b64_encode ( 'Username:' ) )
 	
 	def receive_line ( self, line: bytes ) -> AuthPluginStatus:
-		#log = logger.getChild ( 'AuthLoginPlugin.receive_line' )
+		#log = logger.getChild ( 'AuthPlugin_Login.receive_line' )
 		if self.uid is None:
 			self.uid = b2s ( base64.b64decode ( line ) )
-			return AuthPluginStatusReply ( 334, b64_encode ( 'Password:' ) )
+			return AuthPluginStatus_Reply ( 334, b64_encode ( 'Password:' ) )
 		else:
 			assert isinstance ( self.uid, str )
 			uid: str = self.uid
 			pwd = b2s ( base64.b64decode ( line ) )
-			return AuthPluginStatusCredentials ( uid, pwd )
+			return AuthPluginStatus_Credentials ( uid, pwd )
 
 
-class ServerStateUntrusted ( ServerState ):
+class ServerState_Untrusted ( ServerState ):
 	def on_AUTH ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerStateUntrusted.on_AUTH' )
+		#log = logger.getChild ( 'Server.ServerState_Untrusted.on_AUTH' )
 		global auth_plugins
 		mechanism, *extra = textstring.split ( ' ', 1 )
 		mechanism = mechanism.upper()
 		plugincls = auth_plugins.get ( mechanism )
 		if plugincls is None:
 			yield from server._respond ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
+			return
 		plugin = plugincls()
-		server.state = ServerStateAuth ( plugin )
+		server.state = ServerState_Auth ( plugin )
 		status = plugin.first_line ( extra[0] if extra else '' )
 		yield from status._resolve ( server )
 
 
-class ServerStateAuth ( ServerState ):
+class ServerState_Auth ( ServerState ):
 	def __init__ ( self, plugin: AuthPlugin ) -> None:
 		self.plugin = plugin
 	
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
+		log = logger.getChild ( 'ServerState_Auth.receive_line' )
 		try:
 			status: AuthPluginStatus = self.plugin.receive_line ( line )
-		except Exception as e:
+		except Exception as e: # pragma: no cover # this is going to take some thinking on a clean way to test it
 			log.error ( f'{e=}' )
-			server.state = ServerStateUntrusted()
+			server.state = ServerState_Untrusted()
 			yield from server._respond ( 501, 'malformed auth input' )
 		else:
 			yield from status._resolve ( server )
 
 
-r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?(.*)>?\s*$', re.I )
-r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?(.*)>?\s*$', re.I )
-
-class ServerStateTrusted ( ServerState ):
+class ServerState_Trusted ( ServerState ):
 	def on_RSET ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		server.reset()
-		yield from server._respond ( 250, server.hostname )
+		yield from super().on_RSET ( server, command, textstring )
 	
 	def on_MAIL ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerStateTrusted.on_MAIL' )
+		#log = logger.getChild ( 'Server.ServerState_Trusted.on_MAIL' )
 		#log.debug ( f'{command=} {textstring=}' )
-		m = r_mail_from.match ( textstring )
+		m = _r_mail_from.match ( textstring )
 		if not m:
 			yield from server._respond ( 501, 'malformed MAIL input' )
 		else:
@@ -400,9 +435,9 @@ class ServerStateTrusted ( ServerState ):
 			yield from server.on_mail_from ( mail_from )
 	
 	def on_RCPT ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerStateTrusted.on_RCPT' )
+		#log = logger.getChild ( 'Server.ServerState_Trusted.on_RCPT' )
 		#log.debug ( f'{command=} {textstring=}' )
-		m = r_rcpt_to.match ( textstring )
+		m = _r_rcpt_to.match ( textstring )
 		if not m:
 			yield from server._respond ( 501, 'malformed RCPT input' )
 		else:
@@ -410,19 +445,20 @@ class ServerStateTrusted ( ServerState ):
 			yield from server.on_rcpt_to ( rcpt_to )
 	
 	def on_DATA ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerStateTrusted.on_DATA' )
+		#log = logger.getChild ( 'Server.ServerState_Trusted.on_DATA' )
 		#log.debug ( f'{command=} {textstring=}' )
 		if not server.mail_from:
 			yield from server._respond ( 503, 'no from address received yet' )
 		elif not server.rcpt_to:
 			yield from server._respond ( 503, 'no rcpt address(es) received yet' )
 		else:
-			server.state = ServerStateData()
+			server.state = ServerState_Data()
 			yield from server._respond ( 354, 'Start mail input; end with <CRLF>.<CRLF>' )
 
-class ServerStateData ( ServerState ):
+
+class ServerState_Data ( ServerState ):
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
-		#log = logger.getChild ( 'ServerStateData.receive_line' )
+		#log = logger.getChild ( 'ServerState_Data.receive_line' )
 		#log.debug ( f'{line=}' )
 		if line == b'.\r\n':
 			yield from server.on_complete()
@@ -431,7 +467,6 @@ class ServerStateData ( ServerState ):
 		else:
 			server.data.append ( line )
 
-_r_eol = re.compile ( r'[\r\n]' )
 
 class Server ( Connection ):
 	client_hostname: str = ''
@@ -443,7 +478,7 @@ class Server ( Connection ):
 		assert isinstance ( hostname, str ) and not _r_eol.search ( hostname ), f'invalid {hostname=}'
 		self.hostname = hostname
 		self.reset()
-		self.state: ServerState = ServerStateUntrusted()
+		self.state: ServerState = ServerState_Untrusted()
 	
 	def greeting ( self ) -> bytes:
 		return s2b ( f'220 {self.hostname}\r\n' )
@@ -457,18 +492,21 @@ class Server ( Connection ):
 		self.data = []
 	
 	def _respond ( self, reply_code: int, errortext: str ) -> Iterator[Event]:
+		#log = logger.getChild ( 'Server._respond' )
 		assert isinstance ( reply_code, int ) and 100 <= reply_code <= 599, f'invalid {reply_code=}'
 		assert isinstance ( errortext, str ) and not _r_eol.search ( errortext ), f'invalid {errortext=}'
-		yield SendDataEvent ( s2b ( f'{reply_code} {errortext}\r\n' ) )
+		data: bytes = s2b ( f'{reply_code} {errortext}\r\n' )
+		yield SendDataEvent ( data )
 	
 	def on_authenticate ( self, uid: str, pwd: str ) -> Iterator[Event]:
+		log = logger.getChild ( 'Server.on_authenticate' )
 		event = AuthEvent ( uid, pwd )
 		yield event
 		accepted, code, message = event._accepted()
 		if accepted:
-			self.state = ServerStateTrusted()
+			self.state = ServerState_Trusted()
 		else:
-			self.state = ServerStateUntrusted()
+			self.state = ServerState_Untrusted()
 		yield from self._respond ( code, message )
 	
 	def on_mail_from ( self, mail_from: str ) -> Iterator[Event]:
@@ -491,7 +529,7 @@ class Server ( Connection ):
 		log = logger.getChild ( 'Server.complete' )
 		event = CompleteEvent ( self.mail_from, self.rcpt_to, self.data )
 		self.reset()
-		self.state = ServerStateTrusted()
+		self.state = ServerState_Trusted()
 		yield event
 		accepted, code, message = event._accepted()
 		yield from self._respond ( code, message )
@@ -503,6 +541,10 @@ class Response:
 	def __init__ ( self, code: int, message: str ) -> None:
 		self.code = code
 		self.message = message
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(code={self.code!r}, message={self.message!r})'
 
 class ErrorResponse ( Response, Exception ):
 	def __init__ ( self, code: int, message: str ) -> None:
@@ -516,19 +558,28 @@ class Request ( metaclass = ABCMeta ):
 		self.line = line
 	
 	def send_data ( self ) -> Iterator[SendDataEvent]:
+		#log = logger.getChild ( 'Request.send_data' )
 		yield SendDataEvent ( s2b ( f'{self.line}\r\n' ) )
 	
 	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
 		yield from () # no follow-up
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}()'
 
 class MultiRequest ( Request ):
 	def __init__ ( self, *lines: str ) -> None:
 		self.lines = lines
 	
+	def send_data ( self ) -> Iterator[SendDataEvent]:
+		yield SendDataEvent ( s2b ( f'{self.lines[0]}\r\n' ) )
+	
 	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
 		self.lines = self.lines[1:]
 		if self.lines:
-			yield SendDataEvent ( s2b ( f'{self.lines[0]}\r\n' ) )
+			self.response = None
+			yield from client.send ( self )
 
 class GreetingRequest ( Request ):
 	def __init__ ( self ) -> None:
@@ -542,8 +593,10 @@ class HeloRequest ( Request ):
 		self.domain = domain
 		super().__init__ ( f'HELO {self.domain}' )
 
-#class Ehlo ( Request ):
-#	pass
+class EhloRequest ( Request ):
+	def __init__ ( self, domain: str ) -> None:
+		self.domain = domain
+		super().__init__ ( f'EHLO {self.domain}' )
 
 class AuthPlain1Request ( Request ):
 	def __init__ ( self, uid: str, pwd: str ) -> None:
@@ -565,6 +618,16 @@ class AuthLoginRequest ( MultiRequest ):
 			b64_encode ( uid ),
 			b64_encode ( pwd ),
 		)
+
+class ExpnRequest ( Request ):
+	def __init__ ( self, maillist: str ) -> None:
+		self.maillist = maillist
+		super().__init__ ( f'EXPN {maillist}' )
+
+class VrfyRequest ( Request ):
+	def __init__ ( self, mailbox: str ) -> None:
+		self.mailbox = mailbox
+		super().__init__ ( f'VRFY {mailbox}' )
 
 class MailFromRequest ( Request ):
 	def __init__ ( self, mail_from: str ) -> None:
@@ -598,7 +661,13 @@ class DataRequest ( Request ):
 			self.stage = 2
 			yield from client.send ( self )
 
+class RsetRequest ( Request ):
+	def __init__ ( self ) -> None:
+		super().__init__ ( 'RSET' )
 
+class NoOpRequest ( Request ):
+	def __init__ ( self ) -> None:
+		super().__init__ ( 'NOOP' )
 
 class QuitRequest ( Request ):
 	def __init__ ( self ) -> None:
@@ -619,15 +688,14 @@ class Client ( Connection ):
 		yield from request.send_data()
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Client._receive_line' )
+		log = logger.getChild ( 'Client._receive_line' )
 		try:
 			reply_code = int ( line[:3] )
 			intermed = line[3:4]
 			textstring = b2s ( line[4:] ).rstrip()
-			if intermed not in ( b' ', b'-' ):
-				raise ValueError ( f'invalid {intermed=}' )
-		except ValueError as e:
-			raise Closed ( f'invalid response: {e=}' ) from e
+			assert intermed in ( b' ', b'-' )
+		except Exception as e:
+			raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
 		intermediate = ( intermed == b'-' )
 		
 		#log.debug ( f'clearing {self.request=}' )
@@ -638,7 +706,6 @@ class Client ( Connection ):
 			#log.debug ( f'calling {request=}.on_success()' )
 			yield from request.on_success ( self, request.response )
 		else:
-			request.response = ErrorResponse ( reply_code, textstring )
-			yield ErrorEvent ( reply_code, textstring )
+			raise ErrorResponse ( reply_code, textstring )
 
 #endregion

@@ -8,7 +8,7 @@ import unittest
 if not __package__:
 	from _aiotesting import open_pipe_stream
 else:
-	from ._aiotesting import open_pipe_stream
+	from ._aiotesting import open_pipe_stream # type: ignore
 import smtp
 import smtp_aio
 
@@ -17,7 +17,7 @@ logger = logging.getLogger ( __name__ )
 b2s = smtp.b2s
 
 class Tests ( unittest.TestCase ):
-	def test_auth_plain1 ( self ):
+	def test_auth_plain1 ( self ) -> None:
 		async def _test() -> None:
 			
 			# TODO FIXME: apparently socket.socketpair() does work on Windows, use that instead of _aiotesting.open_pipe_stream()
@@ -28,8 +28,9 @@ class Tests ( unittest.TestCase ):
 				log = logger.getChild ( 'main.client_task' )
 				try:
 					cli = smtp_aio.Client()
+					cli.rx, cli.tx = rx, tx
 					
-					await cli._connect ( rx, tx )
+					await cli._connect()
 					await cli.helo ( 'localhost' )
 					await cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' )
 					await cli.mail_from ( 'from@test.com' )
