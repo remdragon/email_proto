@@ -30,6 +30,14 @@ class Tests ( unittest.TestCase ):
 		self.assertEqual ( repr ( evt ), "smtp.SendDataEvent(data=b'foo')" )
 		
 		# test edge cases in Connection buffer management
+		if True:
+			class BrokenConnection ( smtp.Connection ):
+				def _receive_line ( self, line: bytes ) -> Iterator[smtp.Event]:
+					yield from super()._receive_line ( line )
+			broken = BrokenConnection()
+			with self.assertRaises ( NotImplementedError ):
+				list ( broken._receive_line ( b'fubar' ) )
+		
 		class TestConnection ( smtp.Connection ):
 			def _receive_line ( self, line: bytes ) -> Iterator[smtp.Event]:
 				if line:

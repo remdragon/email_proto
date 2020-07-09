@@ -92,7 +92,7 @@ class Connection ( metaclass = ABCMeta ):
 			raise ProtocolError ( 'maximum line length exceeded' )
 	
 	@abstractmethod
-	def _receive_line ( self, line: bytes ) -> Iterator[Event]: # pragma: no cover
+	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._receive_line()' )
 
