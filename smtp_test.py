@@ -127,6 +127,14 @@ class Tests ( unittest.TestCase ):
 			x.first_line ( '' )
 		with self.assertRaises ( NotImplementedError ):
 			x.receive_line ( b'' )
+		
+		self.assertEqual (
+			smtp._auth_lines ( 'Neque porro quisquam est qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit...'.split() ),
+			[
+				'AUTH Neque porro quisquam est qui dolorem ipsum quia dolor sit amet,',
+				'AUTH consectetur, adipisci velit...',
+			]
+		)
 
 if __name__ == '__main__':
 	logging.basicConfig ( level = logging.DEBUG )

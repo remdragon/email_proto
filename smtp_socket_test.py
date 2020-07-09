@@ -24,19 +24,42 @@ class Tests ( unittest.TestCase ):
 				
 				cli.sock = sock
 				cli._connect()
-				cli.helo ( 'localhost' )
-				cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' )
-				cli.mail_from ( 'from@test.com' )
-				cli.rcpt_to ( 'to@test.com' )
-				cli.data (
+				
+				self.assertEqual (
+					repr ( cli.helo ( 'localhost' ) ),
+					"smtp.Response(250, 'milliways.local greets localhost')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' ) ),
+					"smtp.Response(235, 'Authentication successful')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.mail_from ( 'from@test.com' ) ),
+					"smtp.Response(250, 'OK')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.rcpt_to ( 'to@test.com' ) ),
+					"smtp.Response(250, 'OK')",
+				)
+				
+				self.assertEqual ( repr ( cli.data (
 					b'From: from@test.com\r\n'
 					b'To: to@test.com\r\n'
 					b'Subject: Test email\r\n'
 					b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
 					b'\r\n' # a sane person would use the email module to create their email content...
 					b'This is a test. This message does not end in a period, period.\r\n'
+					b'.<<< Evil line beginning with a dot\r\n'
+					b'Last line of message\r\n'
+				) ), "smtp.Response(250, 'Message accepted for delivery')" )
+				
+				self.assertEqual (
+					repr ( cli.quit() ),
+					"smtp.Response(250, 'OK')",
 				)
-				cli.quit()
 			
 			except smtp.ErrorResponse as e: # pragma: no cover
 				log.error ( f'server error: {e=}' )

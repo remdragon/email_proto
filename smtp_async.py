@@ -101,6 +101,9 @@ class Client ( metaclass = ABCMeta ):
 
 
 class Server ( metaclass = ABCMeta ):
+	esmtp_8bitmime: bool = True
+	esmtp_pipelining: bool = True
+	
 	def __init__ ( self, hostname: str ) -> None:
 		self.hostname = hostname
 	
@@ -128,6 +131,8 @@ class Server ( metaclass = ABCMeta ):
 		log = logger.getChild ( 'Server._run' )
 		try:
 			srv = smtp.Server ( self.hostname )
+			srv.esmtp_8bitmime = self.esmtp_8bitmime
+			srv.esmtp_pipelining = self.esmtp_pipelining
 			
 			async def _send ( data: bytes ) -> None:
 				log.debug ( f'S>{b2s(data).rstrip()}' )

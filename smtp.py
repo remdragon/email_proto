@@ -6,8 +6,8 @@ import base64
 import logging
 import re
 from typing import (
-	Callable, Dict, Iterator, List, Optional as Opt, Sequence as Seq, Tuple,
-	Type, Union,
+	Callable, Dict, Iterable, Iterator, List, Optional as Opt, Sequence as Seq,
+	Tuple, Type, Union,
 )
 
 logger = logging.getLogger ( __name__ )
@@ -227,6 +227,17 @@ class CompleteEvent ( AcceptRejectEvent ):
 	# TODO FIXME: define custom reject_* methods for specific scenarios
 
 
+def _auth_lines ( auth_mechanisms: Iterable[str] ) -> Seq[str]:
+	lines: List[str] = []
+	line = ' '.join ( auth_mechanisms )
+	while len ( line ) >= 71: # 80 - len ( '250-' ) - len ( 'AUTH ' )
+		n = line.rindex ( ' ', 0, 71 ) # raises: ValueError # no auth name can be 71 characters! ( what is the limit? )
+		lines.append ( f'AUTH {line[:n]}' )
+		line = line[n:].lstrip()
+	lines.append ( f'AUTH {line}' )
+	return lines
+
+
 class ServerState:
 	def receive_line ( self, server: Server, line: bytes ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Server.ServerState.receive_line' )
@@ -241,35 +252,57 @@ class ServerState:
 			f = getattr ( self, fname )
 		except AttributeError:
 			#log.debug ( f'{type(self).__module__}.{type(self).__name__} has no {fname}' )
-			yield from server._respond ( 500, f'command not recognized or not available: {command}' )
+			yield from server._singleline_response ( 500, f'command not recognized or not available: {command}' )
 		else:
 			#log.debug ( f'calling {f=}' )
 			yield from f ( server, command, textstring )
 	
 	def on_EHLO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 502, 'TODO FIXME: Command not implemented' )
+		global auth_plugins
+		
+		if server.client_hostname and server.pedantic:
+			yield from server._singleline_response ( 503, 'you already said HELO' )
+			return
+		
+		server.client_hostname = textstring
+		
+		lines: List[str] = [ f'{server.hostname} greets {server.client_hostname}' ]
+		
+		if server.esmtp_pipelining:
+			lines.append ( 'PIPELINING' )
+		if server.esmtp_8bitmime:
+			lines.append ( '8BITMIME' )
+		
+		lines.extend ( _auth_lines ( auth_plugins.keys() ) )
+		
+		yield from server._multiline_response ( 250, *lines )
 	
 	def on_EXPN ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		log = logger.getChild ( 'ServerState.on_EXPN' )
 		log.debug ( f'{command=} {textstring=}' )
-		yield from server._respond ( 550, 'Access Denied!' )
+		yield from server._singleline_response ( 550, 'Access Denied!' )
 	
 	def on_HELO ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		# TODO FIXME: this is not correct, supposed to give a 503 if HELO/EHLO already requested, see RFC1869#4.2
-		yield from server._respond ( 250, server.hostname )
+		if server.client_hostname and server.pedantic:
+			yield from server._singleline_response ( 503, 'you already said HELO' )
+			return
+		
+		server.client_hostname = textstring
+		yield from server._singleline_response ( 250, f'{server.hostname} greets {server.client_hostname}' )
 	
 	def on_NOOP ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 250, 'OK' )
+		yield from server._singleline_response ( 250, 'OK' )
 	
 	def on_QUIT ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 250, 'OK' )
+		yield from server._singleline_response ( 250, 'OK' )
 		raise Closed()
 	
 	def on_RSET ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 250, 'OK' )
+		yield from server._singleline_response ( 250, 'OK' )
 	
 	def on_VRFY ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		yield from server._respond ( 550, 'Access Denied!' )
+		yield from server._singleline_response ( 550, 'Access Denied!' )
 
 
 class AuthPluginStatus ( metaclass = ABCMeta ):
@@ -295,7 +328,7 @@ class AuthPluginStatus_Reply ( AuthPluginStatus ):
 	def _resolve ( self, server: Server ) -> Iterator[Event]:
 		if self.code >= 400:
 			server.state = ServerState_Untrusted()
-		yield from server._respond ( self.code, self.message )
+		yield from server._singleline_response ( self.code, self.message )
 
 
 class AuthPluginStatus_Credentials ( AuthPluginStatus ):
@@ -341,7 +374,7 @@ auth_plugins: Dict[str,Type[AuthPlugin]] = {}
 def auth_plugin ( name: str ) -> Callable[[Type[AuthPlugin]],Type[AuthPlugin]]:
 	def registrar ( cls: Type[AuthPlugin] ) -> Type[AuthPlugin]:
 		global auth_plugins
-		assert name == name.upper(), f'auth mechanisms must be upper-case, not {name!r}'
+		assert name == name.upper() and ' ' not in name and len ( name ) <= 71, f'invalid auth mechanism {name=}'
 		assert name not in auth_plugins, f'duplicate auth mechanism {name!r}'
 		auth_plugins[name] = cls
 		return cls
@@ -395,7 +428,7 @@ class ServerState_Untrusted ( ServerState ):
 		mechanism = mechanism.upper()
 		plugincls = auth_plugins.get ( mechanism )
 		if plugincls is None:
-			yield from server._respond ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
+			yield from server._singleline_response ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
 			return
 		plugin = plugincls()
 		server.state = ServerState_Auth ( plugin )
@@ -414,12 +447,15 @@ class ServerState_Auth ( ServerState ):
 		except Exception as e: # pragma: no cover # this is going to take some thinking on a clean way to test it
 			log.error ( f'{e=}' )
 			server.state = ServerState_Untrusted()
-			yield from server._respond ( 501, 'malformed auth input' )
+			yield from server._singleline_response ( 501, 'malformed auth input' )
 		else:
 			yield from status._resolve ( server )
 
 
 class ServerState_Trusted ( ServerState ):
+	def on_AUTH ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
+		yield from server._singleline_response ( 503, 'already authenticated (RFC4954#4 Restrictions)' )
+	
 	def on_RSET ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		server.reset()
 		yield from super().on_RSET ( server, command, textstring )
@@ -429,7 +465,7 @@ class ServerState_Trusted ( ServerState ):
 		#log.debug ( f'{command=} {textstring=}' )
 		m = _r_mail_from.match ( textstring )
 		if not m:
-			yield from server._respond ( 501, 'malformed MAIL input' )
+			yield from server._singleline_response ( 501, 'malformed MAIL input' )
 		else:
 			mail_from = m.group ( 1 ).strip()
 			yield from server.on_mail_from ( mail_from )
@@ -439,7 +475,7 @@ class ServerState_Trusted ( ServerState ):
 		#log.debug ( f'{command=} {textstring=}' )
 		m = _r_rcpt_to.match ( textstring )
 		if not m:
-			yield from server._respond ( 501, 'malformed RCPT input' )
+			yield from server._singleline_response ( 501, 'malformed RCPT input' )
 		else:
 			rcpt_to = m.group ( 1 ).strip()
 			yield from server.on_rcpt_to ( rcpt_to )
@@ -448,12 +484,12 @@ class ServerState_Trusted ( ServerState ):
 		#log = logger.getChild ( 'Server.ServerState_Trusted.on_DATA' )
 		#log.debug ( f'{command=} {textstring=}' )
 		if not server.mail_from:
-			yield from server._respond ( 503, 'no from address received yet' )
+			yield from server._singleline_response ( 503, 'no from address received yet' )
 		elif not server.rcpt_to:
-			yield from server._respond ( 503, 'no rcpt address(es) received yet' )
+			yield from server._singleline_response ( 503, 'no rcpt address(es) received yet' )
 		else:
 			server.state = ServerState_Data()
-			yield from server._respond ( 354, 'Start mail input; end with <CRLF>.<CRLF>' )
+			yield from server._singleline_response ( 354, 'Start mail input; end with <CRLF>.<CRLF>' )
 
 
 class ServerState_Data ( ServerState ):
@@ -473,6 +509,9 @@ class Server ( Connection ):
 	mail_from: str
 	rcpt_to: List[str]
 	data: List[bytes]
+	pedantic: bool = True # set this to False to relax behaviors that cause no harm for the protocol ( like double-HELO )
+	esmtp_pipelining: bool = True # advertise that we support PIPELINING
+	esmtp_8bitmime: bool = True # this currently doesn't do anything except advertise on EHLO ( not sure anything else is necessary )
 	
 	def __init__ ( self, hostname: str ) -> None:
 		assert isinstance ( hostname, str ) and not _r_eol.search ( hostname ), f'invalid {hostname=}'
@@ -491,12 +530,19 @@ class Server ( Connection ):
 		self.rcpt_to = []
 		self.data = []
 	
-	def _respond ( self, reply_code: int, errortext: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server._respond' )
+	def _singleline_response ( self, reply_code: int, text: str ) -> Iterator[Event]:
+		#log = logger.getChild ( 'Server._singleline_response' )
 		assert isinstance ( reply_code, int ) and 100 <= reply_code <= 599, f'invalid {reply_code=}'
-		assert isinstance ( errortext, str ) and not _r_eol.search ( errortext ), f'invalid {errortext=}'
-		data: bytes = s2b ( f'{reply_code} {errortext}\r\n' )
-		yield SendDataEvent ( data )
+		assert isinstance ( text, str ) and not _r_eol.search ( text ), f'invalid {text=}'
+		yield SendDataEvent ( s2b ( f'{reply_code} {text}\r\n' ) )
+	
+	def _multiline_response ( self, reply_code: int, *lines: str ) -> Iterator[Event]:
+		#log = logger.getChild ( 'Server._multiline_response' )
+		assert isinstance ( reply_code, int ) and 100 <= reply_code <= 599, f'invalid {reply_code=}'
+		seps = ( [ '-' ] * ( len ( lines ) - 1 ) ) + [ ' ' ]
+		for line, sep in zip ( lines, seps ):
+			assert isinstance ( line, str ) and not _r_eol.search ( line ), f'invalid {line=}'
+			yield SendDataEvent ( s2b ( f'{reply_code}{sep}{line}\r\n' ) )
 	
 	def on_authenticate ( self, uid: str, pwd: str ) -> Iterator[Event]:
 		log = logger.getChild ( 'Server.on_authenticate' )
@@ -507,7 +553,7 @@ class Server ( Connection ):
 			self.state = ServerState_Trusted()
 		else:
 			self.state = ServerState_Untrusted()
-		yield from self._respond ( code, message )
+		yield from self._singleline_response ( code, message )
 	
 	def on_mail_from ( self, mail_from: str ) -> Iterator[Event]:
 		event = MailFromEvent ( mail_from )
@@ -515,7 +561,7 @@ class Server ( Connection ):
 		accepted, code, message = event._accepted()
 		if accepted:
 			self.mail_from = mail_from
-		yield from self._respond ( code, message )
+		yield from self._singleline_response ( code, message )
 	
 	def on_rcpt_to ( self, rcpt_to: str ) -> Iterator[Event]:
 		event = RcptToEvent ( rcpt_to )
@@ -523,7 +569,7 @@ class Server ( Connection ):
 		accepted, code, message = event._accepted()
 		if accepted:
 			self.rcpt_to.append ( rcpt_to )
-		yield from self._respond ( code, message )
+		yield from self._singleline_response ( code, message )
 	
 	def on_complete ( self ) -> Iterator[Event]:
 		log = logger.getChild ( 'Server.complete' )
@@ -532,24 +578,25 @@ class Server ( Connection ):
 		self.state = ServerState_Trusted()
 		yield event
 		accepted, code, message = event._accepted()
-		yield from self._respond ( code, message )
+		yield from self._singleline_response ( code, message )
 
 #endregion
 #region CLIENT ----------------------------------------------------------------
 
 class Response:
-	def __init__ ( self, code: int, message: str ) -> None:
+	def __init__ ( self, code: int, *lines: str ) -> None:
 		self.code = code
-		self.message = message
+		assert lines and isinstance ( lines[0], str ) # they should all be str but I'm being lazy here
+		self.lines = lines
 	
 	def __repr__ ( self ) -> str:
 		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}(code={self.code!r}, message={self.message!r})'
+		return f'{cls.__module__}.{cls.__name__}({self.code!r}, {", ".join(map(repr,self.lines))})'
 
 class ErrorResponse ( Response, Exception ):
-	def __init__ ( self, code: int, message: str ) -> None:
-		Response.__init__ ( self, code, message )
-		Exception.__init__ ( self, code, message )
+	def __init__ ( self, code: int, *lines: str ) -> None:
+		Response.__init__ ( self, code, *lines )
+		Exception.__init__ ( self, code, '\n'.join ( lines ) )
 
 class Request ( metaclass = ABCMeta ):
 	response: Opt[Response] = None
@@ -675,10 +722,11 @@ class QuitRequest ( Request ):
 
 class Client ( Connection ):
 	request: Opt[Request] = None
+	_multiline: List[str]
 	
 	def __init__ ( self, greeting: GreetingRequest ) -> None:
 		self.request = greeting
-		#self.state: ClientState = ServerSpeaksFirstState()
+		self._multiline = []
 	
 	def send ( self, request: Request ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Client.send' )
@@ -698,14 +746,22 @@ class Client ( Connection ):
 			raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
 		intermediate = ( intermed == b'-' )
 		
+		if intermediate:
+			#log.debug ( f'multiline not finished: {self._multiline=} + {textstring=}' )
+			self._multiline.append ( textstring )
+			return
+		
 		#log.debug ( f'clearing {self.request=}' )
 		request, self.request = self.request, None
 		assert isinstance ( request, Request )
+		lines = self._multiline + [ textstring ]
+		self._multiline = []
+		#log.debug ( f'response finished: {lines=}' )
 		if reply_code < 400:
-			request.response = Response ( reply_code, textstring )
+			request.response = Response ( reply_code, *lines )
 			#log.debug ( f'calling {request=}.on_success()' )
 			yield from request.on_success ( self, request.response )
 		else:
-			raise ErrorResponse ( reply_code, textstring )
+			raise ErrorResponse ( reply_code, *lines )
 
 #endregion
