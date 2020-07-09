@@ -63,6 +63,7 @@ class SendDataEvent ( Event ):
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}(data={self.data!r})'
 
+
 class Connection ( metaclass = ABCMeta ):
 	_buf: bytes = b''
 	
@@ -99,14 +100,14 @@ class Connection ( metaclass = ABCMeta ):
 #endregion
 #region SERVER ----------------------------------------------------------------
 
-class ErrorEvent ( Event ):
-	def __init__ ( self, code: int, message: str ) -> None:
-		self.code = code
-		self.message = message
-	
-	def __repr__ ( self ) -> str:
-		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}(code={self.code!r}, message={self.message!r})'
+#class ErrorEvent ( Event ):
+#	def __init__ ( self, code: int, message: str ) -> None:
+#		self.code = code
+#		self.message = message
+#	
+#	def __repr__ ( self ) -> str:
+#		cls = type ( self )
+#		return f'{cls.__module__}.{cls.__name__}(code={self.code!r}, message={self.message!r})'
 
 class AcceptRejectEvent ( Event ):
 	success_code: int
@@ -157,6 +158,17 @@ class AcceptRejectEvent ( Event ):
 		) )
 		return f'{cls.__module__}.{cls.__name__}({args})'
 
+
+class StartTlsRequestEvent ( AcceptRejectEvent ):
+	success_code = 220
+	success_message = 'Go ahead, make my day'
+	error_code = 454
+	error_message = 'TLS not available at the moment'
+	# TODO FIXME: also 501 Syntax error (no parameters allowed)
+
+
+class StartTlsBeginEvent ( Event ):
+	pass
 
 class AuthEvent ( AcceptRejectEvent ):
 	success_code = 235
@@ -295,11 +307,18 @@ class ServerState:
 		yield from server._singleline_response ( 250, 'OK' )
 	
 	def on_QUIT ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
+		#log = logger.getChild ( 'ServerState.on_QUIT' )
 		yield from server._singleline_response ( 250, 'OK' )
 		raise Closed()
 	
 	def on_RSET ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		yield from server._singleline_response ( 250, 'OK' )
+	
+	def on_STARTTLS ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
+		if textstring:
+			yield server._singleline_response ( 501, 'Syntax error (no parameters allowed)' )
+		else:
+			yield from server.on_starttls()
 	
 	def on_VRFY ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
 		yield from server._singleline_response ( 550, 'Access Denied!' )
@@ -422,7 +441,7 @@ class AuthPlugin_Login ( AuthPlugin ):
 
 class ServerState_Untrusted ( ServerState ):
 	def on_AUTH ( self, server: Server, command: str, textstring: str ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server.ServerState_Untrusted.on_AUTH' )
+		log = logger.getChild ( 'Server.ServerState_Untrusted.on_AUTH' )
 		global auth_plugins
 		mechanism, *extra = textstring.split ( ' ', 1 )
 		mechanism = mechanism.upper()
@@ -431,6 +450,7 @@ class ServerState_Untrusted ( ServerState ):
 			yield from server._singleline_response ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
 			return
 		plugin = plugincls()
+		log.warning ( 'TODO FIXME: are we in ssl and if not, is this auth plugin allowed to be used in an unencrypted state?' )
 		server.state = ServerState_Auth ( plugin )
 		status = plugin.first_line ( extra[0] if extra else '' )
 		yield from status._resolve ( server )
@@ -517,10 +537,18 @@ class Server ( Connection ):
 		assert isinstance ( hostname, str ) and not _r_eol.search ( hostname ), f'invalid {hostname=}'
 		self.hostname = hostname
 		self.reset()
-		self.state: ServerState = ServerState_Untrusted()
+		self.state: ServerState = ServerState_Untrusted() # TODO FIXME: refactor away ServerState and collapse Request into Event objects that handle client/server logic, use a Server._auth_id: Opt[str] to identify trusted state...
 	
 	def greeting ( self ) -> bytes:
-		return s2b ( f'220 {self.hostname}\r\n' )
+		# if too busy, can also return:
+		#	421-{self.hostname} is too busy to accept mail right now.
+		#	421 Please come back in {delay} seconds.
+		#	(and server disconnects)
+		# or:
+		#	554 No SMTP service here
+		# 	(server stays connected but 503's everything except QUIT)
+		#	(this is a useful state if remote ip is untrusted via blacklisting/whitelisting )
+		return s2b ( f'220 {self.hostname} ESMTP\r\n' )
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
 		yield from self.state.receive_line ( self, line )
@@ -543,6 +571,16 @@ class Server ( Connection ):
 		for line, sep in zip ( lines, seps ):
 			assert isinstance ( line, str ) and not _r_eol.search ( line ), f'invalid {line=}'
 			yield SendDataEvent ( s2b ( f'{reply_code}{sep}{line}\r\n' ) )
+	
+	def on_starttls ( self ) -> Iterator[Event]:
+		event1 = StartTlsRequestEvent()
+		yield event1
+		accepted, code, message = event1._accepted()
+		if not accepted:
+			yield from self._singleline_response ( code, message )
+			return
+		event2 = StartTlsBeginEvent()
+		yield event2
 	
 	def on_authenticate ( self, uid: str, pwd: str ) -> Iterator[Event]:
 		log = logger.getChild ( 'Server.on_authenticate' )
@@ -583,115 +621,244 @@ class Server ( Connection ):
 #endregion
 #region CLIENT ----------------------------------------------------------------
 
-class Response:
+class Response ( Exception ):
 	def __init__ ( self, code: int, *lines: str ) -> None:
 		self.code = code
 		assert lines and isinstance ( lines[0], str ) # they should all be str but I'm being lazy here
 		self.lines = lines
+		super().__init__ ( code, *lines )
+	
+	@staticmethod
+	def parse ( line: Opt[bytes] ) -> ResponseType:
+		assert isinstance ( line, bytes )
+		try:
+			code = int ( line[:3] )
+			assert 200 <= code <= 599, f'invalid {code=}'
+			intermediate = line[3:4]
+			text = b2s ( line[4:] ).rstrip()
+			assert intermediate in ( b' ', b'-' )
+		except Exception as e:
+			raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
+		if intermediate == b'-':
+			return IntermediateResponse ( code, text )
+		if code < 400:
+			return SuccessResponse ( code, text )
+		else:
+			return ErrorResponse ( code, text )
 	
 	def __repr__ ( self ) -> str:
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}({self.code!r}, {", ".join(map(repr,self.lines))})'
 
-class ErrorResponse ( Response, Exception ):
-	def __init__ ( self, code: int, *lines: str ) -> None:
-		Response.__init__ ( self, code, *lines )
-		Exception.__init__ ( self, code, '\n'.join ( lines ) )
+class NeedDataEvent ( Event ):
+	data: Opt[bytes] = None
+	response: Opt[Response] = None
+
+class SuccessResponse ( Response ):
+	pass
+
+class ErrorResponse ( Response ):
+	pass
+
+class IntermediateResponse ( Response ):
+	pass
 
 class Request ( metaclass = ABCMeta ):
+	# TODO FIXME: this will become the basis of all client/server command handling
+	# maybe rename to Command?
+	# 1) client will use __init__() to construct request
+	# 2) server will use @classmethod parse ( line: bytes ) to construct request ( experiment with calling __new__() directly to bypass client's __init__ )
+	# 3) client-specific API that Client class will use to control status of multi-line interaction
+	# 4) server-specific API that Server class will use for the same
+	# AuthPlugin() should be able to inherit from this
+	# users will be able to create their own custom Request/Command objects
 	response: Opt[Response] = None
 	
-	def __init__ ( self, line: str ) -> None:
-		self.line = line
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}()'
+
+def _client_proto_send ( line: str ) -> Iterator[Event]:
+	assert line.endswith ( '\r\n' )
+	yield SendDataEvent ( s2b ( line ) )
+
+def _client_proto_recv ( event: NeedDataEvent() ) -> Iterator[Event]:
+	event.data = None
+	event.response = None
+	yield event
+	event.response = Response.parse ( event.data )
+
+def _client_proto_recv_done() -> Iterator[Event]:
+	log = logger.getChild ( '_client_proto_recv_done' )
+	event = NeedDataEvent()
+	log.debug ( 'waiting for data' )
+	yield event
+	log.debug ( f'{event.data=}' )
+	response = Response.parse ( event.data )
+	log.debug ( f'{response=}' )
+	raise response
+
+def _client_proto_send_recv_ok ( line: str ) -> Iterator[Event]:
+	yield from _client_proto_send ( line )
+	event = NeedDataEvent()
+	yield event
+	response = Response.parse ( event.data )
+	if not isinstance ( response, SuccessResponse ):
+		raise response
+
+def _client_proto_send_recv_done ( line: str ) -> Iterator[Event]:
+	yield from _client_proto_send ( line )
+	yield from _client_proto_recv_done()
+
+class GreetingRequest ( Request ):
+	def __init__ ( self ) -> None:
+		pass
+	
+	def send_data ( self ) -> Iterator[SendDataEvent]:
+		yield from ()
+	
+	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
+		yield from ()
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
+		yield from _client_proto_recv_done()
+
+class HeloRequest ( Request ):
+	def __init__ ( self, domain: str ) -> None:
+		self.domain = domain
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'HeloRequest._client_protocol' )
+		yield from _client_proto_send_recv_done ( f'HELO {self.domain}\r\n' )
+
+class EhloResponse ( SuccessResponse ):
+	esmtp_8bitmime: bool
+	esmtp_auth: Set[str]
+	esmtp_pipelining: bool
+	esmtp_starttls: bool
+
+class EhloRequest ( Request ):
+	
+	def __init__ ( self, domain: str ) -> None:
+		self.domain = domain
+		self.esmtp_auth = set()
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'EhloRequest._client_protocol' )
+		yield from _client_proto_send ( f'EHLO {self.domain}\r\n' )
+		event = NeedDataEvent()
+		lines: List[str] = []
+		
+		esmtp_8bitmime: bool = False
+		esmtp_auth: Set[str] = set()
+		esmtp_pipelining: bool = False
+		esmtp_starttls: bool = False
+		
+		while True:
+			yield from _client_proto_recv ( event )
+			tmp: Opt[Response] = event.response
+			assert tmp is not None
+			if isinstance ( tmp, ErrorResponse ):
+				raise tmp
+			line = tmp.lines[0]
+			lines.append ( line )
+			
+			# TODO FIXME: some kind of plugin system so this is not hard-coded maybe?
+			log.debug ( f'{line=}' )
+			if line.startswith ( '8BITMIME' ):
+				esmtp_8bitmime = True
+			elif line.startswith ( 'AUTH ' ):
+				for auth in line.split ( ' ' )[1:]:
+					esmtp_auth.add ( auth )
+			elif line.startswith ( 'PIPELINING' ):
+				esmtp_pipelining = True
+			elif line.startswith ( 'STARTTLS' ):
+				esmtp_starttls = True
+			if isinstance ( tmp, SuccessResponse ):
+				r = EhloResponse ( tmp.code, *lines )
+				r.esmtp_8bitmime = esmtp_8bitmime
+				r.esmtp_auth = esmtp_auth
+				r.esmtp_pipelining = esmtp_pipelining
+				r.esmtp_starttls = esmtp_starttls
+				raise r
+
+class StartTlsRequest ( Request ):
+	def __init__ ( self ) -> None:
+		super().__init__ ( 'STARTTLS' )
 	
 	def send_data ( self ) -> Iterator[SendDataEvent]:
 		#log = logger.getChild ( 'Request.send_data' )
 		yield SendDataEvent ( s2b ( f'{self.line}\r\n' ) )
 	
 	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
-		yield from () # no follow-up
-	
-	def __repr__ ( self ) -> str:
-		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}()'
+		yield StartTlsBeginEvent()
 
-class MultiRequest ( Request ):
-	def __init__ ( self, *lines: str ) -> None:
-		self.lines = lines
-	
-	def send_data ( self ) -> Iterator[SendDataEvent]:
-		yield SendDataEvent ( s2b ( f'{self.lines[0]}\r\n' ) )
-	
-	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
-		self.lines = self.lines[1:]
-		if self.lines:
-			self.response = None
-			yield from client.send ( self )
-
-class GreetingRequest ( Request ):
-	def __init__ ( self ) -> None:
-		pass
-	
-	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
-		yield from ()
-
-class HeloRequest ( Request ):
-	def __init__ ( self, domain: str ) -> None:
-		self.domain = domain
-		super().__init__ ( f'HELO {self.domain}' )
-
-class EhloRequest ( Request ):
-	def __init__ ( self, domain: str ) -> None:
-		self.domain = domain
-		super().__init__ ( f'EHLO {self.domain}' )
-
-class AuthPlain1Request ( Request ):
+class _AuthRequest ( Request ):
 	def __init__ ( self, uid: str, pwd: str ) -> None:
-		authtext = b64_encode ( f'{uid}\0{uid}\0{pwd}' )
-		super().__init__ ( f'AUTH PLAIN {authtext}' )
+		self.uid = uid
+		self.pwd = pwd
 
-class AuthPlain2Request ( MultiRequest ):
-	def __init__ ( self, uid: str, pwd: str ) -> None:
-		authtext = b64_encode ( f'{uid}\0{uid}\0{pwd}' )
-		super().__init__ (
-			'AUTH PLAIN',
-			authtext,
-		)
+class AuthPlain1Request ( _AuthRequest ):
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'AuthPlain1Request._client_protocol' )
+		authtext = b64_encode ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
+		yield from _client_proto_send_recv_done ( f'AUTH PLAIN {authtext}\r\n' )
 
-class AuthLoginRequest ( MultiRequest ):
-	def __init__ ( self, uid: str, pwd: str ) -> None:
-		super().__init__ (
-			'AUTH LOGIN',
-			b64_encode ( uid ),
-			b64_encode ( pwd ),
-		)
+class AuthPlain2Request ( _AuthRequest ):
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'AuthPlain1Request._client_protocol' )
+		yield from _client_proto_send_recv_ok ( 'AUTH PLAIN\r\n' )
+		authtext = b64_encode ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
+		yield from _client_proto_send_recv_done ( f'{authtext}\r\n' )
 
-class ExpnRequest ( Request ):
+class AuthLoginRequest ( _AuthRequest ):
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'AuthLoginRequest._client_protocol' )
+		yield from _client_proto_send_recv_ok ( 'AUTH LOGIN\r\n' )
+		yield from _client_proto_send_recv_ok ( f'{b64_encode(self.uid)}\r\n' )
+		yield from _client_proto_send_recv_done ( f'{b64_encode(self.pwd)}\r\n' )
+
+class ExpnRequest ( Request ): # pragma: no cover # TODO FIXME this needs to be implemented
 	def __init__ ( self, maillist: str ) -> None:
 		self.maillist = maillist
-		super().__init__ ( f'EXPN {maillist}' )
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'ExpnRequest._client_protocol' )
+		# TODO FIXME: this needs to be implemented
+		yield from _client_proto_send_recv_done ( f'EXPN {self.maillist}\r\n' )
 
-class VrfyRequest ( Request ):
+class VrfyRequest ( Request ): # pragma: no cover # TODO FIXME this needs to be implemented
 	def __init__ ( self, mailbox: str ) -> None:
 		self.mailbox = mailbox
-		super().__init__ ( f'VRFY {mailbox}' )
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'ExpnRequest._client_protocol' )
+		yield from _client_proto_send_recv_done ( f'VRFY {self.mailbox}\r\n' )
 
 class MailFromRequest ( Request ):
 	def __init__ ( self, mail_from: str ) -> None:
 		self.mail_from = mail_from
-		super().__init__ ( f'MAIL FROM:<{mail_from}>' )
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'MailFromRequest._client_protocol' )
+		yield from _client_proto_send_recv_done ( f'MAIL FROM:<{self.mail_from}>\r\n' )
 
 class RcptToRequest ( Request ):
-	def __init__ ( self, mail_from: str ) -> None:
-		self.mail_from = mail_from
-		super().__init__ ( f'RCPT TO:<{mail_from}>' )
+	def __init__ ( self, rcpt_to: str ) -> None:
+		self.rcpt_to = rcpt_to
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'RcptToRequest._client_protocol' )
+		yield from _client_proto_send_recv_done ( f'RCPT TO:<{self.rcpt_to}>\r\n' )
+
+_r_crlf_dot = re.compile ( b'\\r\\n\\.', re.M )
 
 class DataRequest ( Request ):
 	initial_response: Opt[Response] = None
 	
 	def __init__ ( self, payload: bytes ) -> None:
 		assert isinstance ( payload, bytes_types ) and len ( payload ) > 0
-		self.stage: int = 1
 		self.payload: bytes = payload
 	
 	def send_data ( self ) -> Iterator[SendDataEvent]:
@@ -707,61 +874,133 @@ class DataRequest ( Request ):
 			self.response = None # wait for next response...
 			self.stage = 2
 			yield from client.send ( self )
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'DataRequest._client_protocol' )
+		yield from _client_proto_send_recv_ok ( 'DATA\r\n' )
+		payload = self.payload
+		last = 0
+		stitch = b'\r\n..'
+		for m in _r_crlf_dot.finditer ( payload ):
+			start = m.start()
+			chunk = payload[last:start] # TODO FIXME: performance concern: does this copy or is it a view?
+			log.debug ( f'{last=} {start=} {chunk=} {stitch=}' )
+			yield SendDataEvent ( chunk )
+			yield SendDataEvent ( stitch )
+			last = start + 3
+		tail = payload[last:]
+		if tail:
+			log.debug ( f'{last=} {tail=}' )
+			yield SendDataEvent ( tail )
+		yield from _client_proto_send_recv_done ( '\r\n.\r\n' )
 
 class RsetRequest ( Request ):
-	def __init__ ( self ) -> None:
-		super().__init__ ( 'RSET' )
+	def _client_protocol ( self ) -> Iterator[Event]:
+		yield from _client_proto_send_recv_done ( 'RSET\r\n' )
 
 class NoOpRequest ( Request ):
-	def __init__ ( self ) -> None:
-		super().__init__ ( 'NOOP' )
+	def _client_protocol ( self ) -> Iterator[Event]:
+		yield from _client_proto_send_recv_done ( 'NOOP\r\n' )
 
 class QuitRequest ( Request ):
-	def __init__ ( self ) -> None:
-		super().__init__ ( 'QUIT' )
+	def _client_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'QuitRequest._client_protocol' )
+		yield from _client_proto_send_recv_done ( 'QUIT\r\n' )
 
 class Client ( Connection ):
 	request: Opt[Request] = None
+	request_protocol: Opt[Iterator[Event]] = None
+	need_data: Opt[NeedDataEvent] = None
+	
 	_multiline: List[str]
 	
-	def __init__ ( self, greeting: GreetingRequest ) -> None:
-		self.request = greeting
+	def __init__ ( self ) -> None:
 		self._multiline = []
 	
 	def send ( self, request: Request ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Client.send' )
 		assert self.request is None, f'trying to send {request=} but not finished processing {self.request=}'
 		self.request = request
-		#log.debug ( f'setting {self.request=}' )
-		yield from request.send_data()
+		self.request_protocol = request._client_protocol()
+		#log.debug ( f'set {self.request=}' )
+		yield from self._run_protocol()
+	
+	def _run_protocol ( self ) -> Iterator[Event]:
+		log = logger.getChild ( 'Client._run_protocol' )
+		while True:
+			try:
+				#log.debug ( 'yielding to request protocol' )
+				event = next ( self.request_protocol )
+				#log.debug ( f'{event=}' )
+				if isinstance ( event, NeedDataEvent ):
+					self.need_data = event
+					return
+				else:
+					yield event
+			except Closed as e:
+				log.debug ( f'request protocol indication connection closure: {e=}' )
+				self.request = None
+				self.request_protocol = None
+				raise
+			except Response as response:
+				log.debug ( f'request protocol finished with {response=}' )
+				self.request.response = response
+				self.request = None
+				self.request_protocol = None
+				if isinstance ( response, ErrorResponse ):
+					raise
+				return
+			except StopIteration:
+				log.exception ( 'request protocol exited without response' )
+				self.request = None
+				self.request_protocol = None
+				return
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
 		log = logger.getChild ( 'Client._receive_line' )
-		try:
-			reply_code = int ( line[:3] )
-			intermed = line[3:4]
-			textstring = b2s ( line[4:] ).rstrip()
-			assert intermed in ( b' ', b'-' )
-		except Exception as e:
-			raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
-		intermediate = ( intermed == b'-' )
 		
-		if intermediate:
-			#log.debug ( f'multiline not finished: {self._multiline=} + {textstring=}' )
-			self._multiline.append ( textstring )
-			return
-		
-		#log.debug ( f'clearing {self.request=}' )
-		request, self.request = self.request, None
-		assert isinstance ( request, Request )
-		lines = self._multiline + [ textstring ]
-		self._multiline = []
-		#log.debug ( f'response finished: {lines=}' )
-		if reply_code < 400:
-			request.response = Response ( reply_code, *lines )
-			#log.debug ( f'calling {request=}.on_success()' )
-			yield from request.on_success ( self, request.response )
+		if True:
+			if self.need_data:
+				#log.debug ( f'got data for protocol: {line=}' )
+				self.need_data.data = line
+				self.need_data = None
+				yield from self._run_protocol()
+			else:
+				assert False, f'unexpected {line=}'
+				try:
+					reply_code = int ( line[:3] )
+					intermed = line[3:4]
+					textstring = b2s ( line[4:] ).rstrip()
+					assert intermed in ( b' ', b'-' )
+				except Exception as e:
+					raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
 		else:
-			raise ErrorResponse ( reply_code, *lines )
+			
+			try:
+				reply_code = int ( line[:3] )
+				intermed = line[3:4]
+				textstring = b2s ( line[4:] ).rstrip()
+				assert intermed in ( b' ', b'-' )
+			except Exception as e:
+				raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
+			intermediate = ( intermed == b'-' )
+			
+			if intermediate:
+				#log.debug ( f'multiline not finished: {self._multiline=} + {textstring=}' )
+				self._multiline.append ( textstring )
+				return
+			
+			#log.debug ( f'clearing {self.request=}' )
+			request, self.request = self.request, None
+			assert isinstance ( request, Request )
+			lines = self._multiline + [ textstring ]
+			self._multiline = []
+			#log.debug ( f'response finished: {lines=}' )
+			if reply_code < 400:
+				request.response = Response ( reply_code, *lines )
+				#log.debug ( f'calling {request=}.on_success()' )
+				yield from request.on_success ( self, request.response )
+			else:
+				raise ErrorResponse ( reply_code, *lines )
 
 #endregion

@@ -4,14 +4,15 @@ from __future__ import annotations
 from abc import ABCMeta, abstractmethod
 import logging
 import socket
+import ssl
 
 # mail_proto imports:
-import smtp
+import smtp_proto
 import smtp_sync
 
 logger = logging.getLogger ( __name__ )
 
-b2s = smtp.b2s
+b2s = smtp_proto.b2s
 
 
 class Transport:
@@ -48,3 +49,9 @@ class Server ( Transport, smtp_sync.Server ):
 	def run ( self, sock: socket.socket ) -> None:
 		self.sock = sock
 		self._run()
+	
+	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+		self.sock = ssl.create_default_context ( ssl.Purpose.CLIENT_AUTH ).wrap_socket (
+			self.sock,
+			server_side = True,
+		)

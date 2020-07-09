@@ -3,72 +3,79 @@ from abc import ABCMeta, abstractmethod
 import logging
 
 # email_proto imports:
-import smtp
+import smtp_proto
 
 logger = logging.getLogger ( __name__ )
 
-b2s = smtp.b2s
+b2s = smtp_proto.b2s
 
 class Client ( metaclass = ABCMeta ):
-	cli: smtp.Client
+	cli: smtp_proto.Client
 	
-	async def _connect ( self ) -> smtp.Response:
-		greeting = smtp.GreetingRequest()
-		self.cli = smtp.Client ( greeting )
-		return await self._recv ( greeting )
+	async def _connect ( self ) -> smtp_proto.Response:
+		self.cli = smtp_proto.Client()
+		return await self.greeting()
 	
-	async def helo ( self, local_hostname: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.HeloRequest ( local_hostname ) )
+	async def greeting ( self ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.GreetingRequest() )
 	
-	async def ehlo ( self, local_hostname: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.EhloRequest ( local_hostname ) )
+	async def helo ( self, local_hostname: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.HeloRequest ( local_hostname ) )
 	
-	async def auth_plain1 ( self, uid: str, pwd: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.AuthPlain1Request ( uid, pwd ) )
+	async def ehlo ( self, local_hostname: str ) -> smtp_proto.EhloResponse:
+		r = await self._send_recv ( smtp_proto.EhloRequest ( local_hostname ) )
+		assert isinstance ( r, smtp_proto.EhloResponse ), f'invalid {r=}'
+		return r
 	
-	async def auth_plain2 ( self, uid: str, pwd: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.AuthPlain2Request ( uid, pwd ) )
+	async def starttls ( self ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.StartTlsRequest() )
 	
-	async def auth_login ( self, uid: str, pwd: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.AuthLoginRequest ( uid, pwd ) )
+	async def auth_plain1 ( self, uid: str, pwd: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.AuthPlain1Request ( uid, pwd ) )
 	
-	async def expn ( self, maillist: str ) -> smtp.Response:
+	async def auth_plain2 ( self, uid: str, pwd: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.AuthPlain2Request ( uid, pwd ) )
+	
+	async def auth_login ( self, uid: str, pwd: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.AuthLoginRequest ( uid, pwd ) )
+	
+	async def expn ( self, maillist: str ) -> smtp_proto.Response:
 		log = logger.getChild ( 'Client.expn' )
 		log.debug ( f'{maillist=}' )
-		return await self._send_recv ( smtp.ExpnRequest ( maillist ) )
+		return await self._send_recv ( smtp_proto.ExpnRequest ( maillist ) )
 	
-	async def vrfy ( self, mailbox: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.VrfyRequest ( mailbox ) )
+	async def vrfy ( self, mailbox: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
 	
-	async def mail_from ( self, email: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.MailFromRequest ( email ) )
+	async def mail_from ( self, email: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.MailFromRequest ( email ) )
 	
-	async def rcpt_to ( self, email: str ) -> smtp.Response:
-		return await self._send_recv ( smtp.RcptToRequest ( email ) )
+	async def rcpt_to ( self, email: str ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.RcptToRequest ( email ) )
 	
-	async def data ( self, content: bytes ) -> smtp.Response:
-		return await self._send_recv ( smtp.DataRequest ( content ) )
+	async def data ( self, content: bytes ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.DataRequest ( content ) )
 	
-	async def rset ( self ) -> smtp.Response:
-		return await self._send_recv ( smtp.RsetRequest() )
+	async def rset ( self ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.RsetRequest() )
 	
-	async def noop ( self ) -> smtp.Response:
-		return await self._send_recv ( smtp.NoOpRequest() )
+	async def noop ( self ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.NoOpRequest() )
 	
-	async def quit ( self ) -> smtp.Response:
-		return await self._send_recv ( smtp.QuitRequest() )
+	async def quit ( self ) -> smtp_proto.Response:
+		return await self._send_recv ( smtp_proto.QuitRequest() )
 	
-	async def _event ( self, event: smtp.Event ) -> None:
+	async def _event ( self, event: smtp_proto.Event ) -> None:
 		log = logger.getChild ( 'Client._event' )
-		if isinstance ( event, smtp.SendDataEvent ):
+		if isinstance ( event, smtp_proto.SendDataEvent ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			await self._write ( event.data )
-		elif isinstance ( event, smtp.ErrorEvent ):
-			raise smtp.ErrorResponse ( event.code, event.message )
+		#elif isinstance ( event, smtp_proto.ErrorEvent ):
+		#	raise smtp_proto.ErrorResponse ( event.code, event.message )
 		else:
 			assert False, f'unrecognized {event=}'
 	
-	async def _recv ( self, request: smtp.Request ) -> smtp.Response:
+	async def _recv ( self, request: smtp_proto.Request ) -> smtp_proto.Response:
 		log = logger.getChild ( 'Client._recv' )
 		while not request.response:
 			data: bytes = await self._read()
@@ -78,7 +85,7 @@ class Client ( metaclass = ABCMeta ):
 		log.debug ( f'{request=} -> {request.response=}' )
 		return request.response
 	
-	async def _send_recv ( self, request: smtp.Request ) -> smtp.Response:
+	async def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.Response:
 		log = logger.getChild ( 'Client._send_recv' )
 		for event in self.cli.send ( request ):
 			await self._event ( event )
@@ -108,29 +115,39 @@ class Server ( metaclass = ABCMeta ):
 		self.hostname = hostname
 	
 	@abstractmethod
-	async def on_authenticate ( self, event: smtp.AuthEvent ) -> None: # pragma: no cover
+	async def on_starttls_request ( self, event: smtp_proto.StartTlsRequestEvent ) -> None: # pragma: no cover
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_starttls_request()' )
+	
+	@abstractmethod
+	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_starttls_begin()' )
+	
+	@abstractmethod
+	async def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_authenticate()' )
 	
 	@abstractmethod
-	async def on_mail_from ( self, event: smtp.MailFromEvent ) -> None: # pragma: no cover
+	async def on_mail_from ( self, event: smtp_proto.MailFromEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_mail_from()' )
 	
 	@abstractmethod
-	async def on_rcpt_to ( self, event: smtp.RcptToEvent ) -> None: # pragma: no cover
+	async def on_rcpt_to ( self, event: smtp_proto.RcptToEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_rcpt_to()' )
 	
 	@abstractmethod
-	async def on_complete ( self, event: smtp.CompleteEvent ) -> None: # pragma: no cover
+	async def on_complete ( self, event: smtp_proto.CompleteEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_rcpt_to()' )
 	
 	async def _run ( self ) -> None:
 		log = logger.getChild ( 'Server._run' )
 		try:
-			srv = smtp.Server ( self.hostname )
+			srv = smtp_proto.Server ( self.hostname )
 			srv.esmtp_8bitmime = self.esmtp_8bitmime
 			srv.esmtp_pipelining = self.esmtp_pipelining
 			
@@ -143,24 +160,28 @@ class Server ( metaclass = ABCMeta ):
 				try:
 					data = await self._read()
 				except OSError: # TODO FIXME: more specific exception?
-					raise smtp.Closed()
+					raise smtp_proto.Closed()
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
-					if isinstance ( event, smtp.SendDataEvent ): # this will be the most common event...
+					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
 						await _send ( event.data )
-					elif isinstance ( event, smtp.RcptToEvent ): # 2nd most common event
+					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
 						await self.on_rcpt_to ( event )
-					elif isinstance ( event, smtp.AuthEvent ):
+					elif isinstance ( event, smtp_proto.StartTlsRequestEvent ):
+						await self.on_starttls_request ( event )
+					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
+						await self.on_starttls_begin ( event )
+					elif isinstance ( event, smtp_proto.AuthEvent ):
 						await self.on_authenticate ( event )
-					elif isinstance ( event, smtp.MailFromEvent ):
+					elif isinstance ( event, smtp_proto.MailFromEvent ):
 						await self.on_mail_from ( event )
-					elif isinstance ( event, smtp.CompleteEvent ):
+					elif isinstance ( event, smtp_proto.CompleteEvent ):
 						await self.on_complete ( event )
-					elif isinstance ( event, smtp.ErrorEvent ):
-						raise smtp.ErrorResponse ( event.code, event.message )
+					#elif isinstance ( event, smtp_proto.ErrorEvent ):
+					#	raise smtp_proto.ErrorResponse ( event.code, event.message )
 					else:
 						assert False, f'unrecognized {event=}'
-		except smtp.Closed:
+		except smtp_proto.Closed:
 			pass
 		finally:
 			await self._close()

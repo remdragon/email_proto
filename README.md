@@ -30,9 +30,9 @@ client.quit()
 
 ## Files
 
-* `smtp.py`: sans i/o implementation of SMTP
-* `smtp_sync.py`: reference sync wrapper of `smtp.py`
-* `smtp_async.py`: reference async wrapper of `smtp.py`
+* `smtp_proto.py`: SMTP protocol implementation sans i/o
+* `smtp_sync.py`: reference sync wrapper of `smtp_proto.py`
+* `smtp_async.py`: reference async wrapper of `smtp_proto.py`
 * `smtp_socket.py`: reference sync implementation of `smtp_sync.py` using `socket.socket`
 * `smtp_aio.py`: reference async implementation of `smtp_async.py` using `asyncio.StreamReader`/`asyncio.StreamWriter`
 * `smtp_trio.py`: reference async implementation of `symtp-async.py` using `trio.abc.Stream`

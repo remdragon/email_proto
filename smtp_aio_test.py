@@ -9,12 +9,12 @@ if not __package__:
 	from _aiotesting import open_pipe_stream
 else:
 	from ._aiotesting import open_pipe_stream # type: ignore
-import smtp
+import smtp_proto
 import smtp_aio
 
 logger = logging.getLogger ( __name__ )
 
-b2s = smtp.b2s
+b2s = smtp_proto.b2s
 
 class Tests ( unittest.TestCase ):
 	def test_auth_plain1 ( self ) -> None:
@@ -30,10 +30,13 @@ class Tests ( unittest.TestCase ):
 					cli = smtp_aio.Client()
 					cli.rx, cli.tx = rx, tx
 					
-					await cli._connect()
+					self.assertEqual (
+						repr ( await cli._connect() ),
+						"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
+					)
 					
 					r = await cli.ehlo ( 'localhost' )
-					self.assertEqual ( type ( r ), smtp.Response )
+					self.assertEqual ( type ( r ), smtp_proto.EhloResponse )
 					self.assertEqual ( r.code, 250 )
 					self.assertEqual ( sorted ( r.lines ), [
 						'AUTH PLAIN LOGIN',
@@ -42,17 +45,17 @@ class Tests ( unittest.TestCase ):
 					
 					self.assertEqual (
 						repr ( await cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' ) ),
-						"smtp.Response(235, 'Authentication successful')",
+						"smtp_proto.SuccessResponse(235, 'Authentication successful')",
 					)
 					
 					self.assertEqual (
 						repr ( await cli.mail_from ( 'from@test.com' ) ),
-						"smtp.Response(250, 'OK')",
+						"smtp_proto.SuccessResponse(250, 'OK')",
 					)
 					
 					self.assertEqual (
 						repr ( await cli.rcpt_to ( 'to@test.com' ) ),
-						"smtp.Response(250, 'OK')",
+						"smtp_proto.SuccessResponse(250, 'OK')",
 					)
 					
 					self.assertEqual ( repr ( await cli.data (
@@ -64,16 +67,16 @@ class Tests ( unittest.TestCase ):
 						b'This is a test. This message does not end in a period, period.\r\n'
 						b'.<<< Evil line beginning with a dot\r\n'
 						b'Last line of message\r\n'
-					) ), "smtp.Response(250, 'Message accepted for delivery')" )
+					) ), "smtp_proto.SuccessResponse(250, 'Message accepted for delivery')" )
 					
 					self.assertEqual (
 						repr ( await cli.quit() ),
-						"smtp.Response(250, 'OK')",
+						"smtp_proto.SuccessResponse(250, 'OK')",
 					)
 				
-				except smtp.ErrorResponse as e: # pragma: no cover
+				except smtp_proto.ErrorResponse as e: # pragma: no cover
 					log.error ( f'server error: {e=}' )
-				except smtp.Closed as e: # pragma: no cover
+				except smtp_proto.Closed as e: # pragma: no cover
 					log.debug ( f'server closed connection: {e=}' )
 				finally:
 					tx.close()
@@ -82,19 +85,25 @@ class Tests ( unittest.TestCase ):
 				log = logger.getChild ( 'main.server_task' )
 				try:
 					class TestServer ( smtp_aio.Server ):
-						async def on_authenticate ( self, event: smtp.AuthEvent ) -> None:
+						async def on_starttls_request ( self, event: smtp_proto.StartTlsRequestEvent ) -> None:
+							event.reject() # not implemented yet
+						
+						async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+							raise NotImplementedError
+						
+						async def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None:
 							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
 								event.accept()
 							else:
 								event.reject()
 						
-						async def on_mail_from ( self, event: smtp.MailFromEvent ) -> None:
+						async def on_mail_from ( self, event: smtp_proto.MailFromEvent ) -> None:
 							event.accept() # or .reject()
 						
-						async def on_rcpt_to ( self, event: smtp.RcptToEvent ) -> None:
+						async def on_rcpt_to ( self, event: smtp_proto.RcptToEvent ) -> None:
 							event.accept() # or .reject()
 						
-						async def on_complete ( self, event: smtp.CompleteEvent ) -> None:
+						async def on_complete ( self, event: smtp_proto.CompleteEvent ) -> None:
 							log.debug ( f'MAIL FROM: {event.mail_from}' )
 							for rcpt_to in event.rcpt_to:
 								log.debug ( f'RCPT TO: {rcpt_to}' )
@@ -107,7 +116,7 @@ class Tests ( unittest.TestCase ):
 					srv.esmtp_8bitmime = False # code coverage reasons
 					
 					await srv.run ( rx, tx )
-				except smtp.Closed:
+				except smtp_proto.Closed:
 					pass
 				finally:
 					tx.close()

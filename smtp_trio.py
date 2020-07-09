@@ -6,7 +6,7 @@ import logging
 import trio # pip install trio trio-typing
 
 # mail_proto imports:
-import smtp
+import smtp_proto
 import smtp_async
 
 logger = logging.getLogger ( __name__ )

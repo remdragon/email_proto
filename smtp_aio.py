@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 # mail_proto imports:
-import smtp
+import smtp_proto
 import smtp_async
 
 logger = logging.getLogger ( __name__ )
