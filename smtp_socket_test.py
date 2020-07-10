@@ -9,6 +9,7 @@ import trustme # pip install trustme
 import unittest
 
 # mail_proto imports:
+import itrustme
 import smtp_proto
 import smtp_socket
 
@@ -16,8 +17,7 @@ logger = logging.getLogger ( __name__ )
 
 b2s = smtp_proto.b2s
 
-ca = trustme.CA()
-server_cert = ca.issue_cert ( 'milliways.local' )
+trust = itrustme.ServerOnly ( server_hostname = 'milliways.local' )
 
 class Tests ( unittest.TestCase ):
 	def test_auth_plain1 ( self ) -> None:
@@ -29,8 +29,7 @@ class Tests ( unittest.TestCase ):
 				cli = smtp_socket.Client()
 				
 				cli.server_hostname = 'milliways.local'
-				cli.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
-				ca.configure_trust ( cli.ssl_context )
+				cli.ssl_context = trust.client_context()
 				cli.sock = sock
 				
 				self.assertEqual (
@@ -139,11 +138,7 @@ class Tests ( unittest.TestCase ):
 				
 				srv = TestServer ( 'milliways.local' )
 				
-				srv.ssl_context = ssl.create_default_context()
-				srv.ssl_context.check_hostname = False
-				server_cert.configure_cert ( srv.ssl_context )
-				ca.configure_trust ( srv.ssl_context )
-				srv.ssl_context.verify_mode = ssl.CERT_NONE
+				srv.ssl_context = trust.server_context()
 				
 				srv.run ( sock )
 			except smtp_proto.Closed:
