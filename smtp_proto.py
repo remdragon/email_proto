@@ -484,6 +484,7 @@ class EhloRequest ( Request ):
 				lines.append ( 'STARTTLS' )
 			yield ResponseEvent ( 250, *lines )
 
+
 #@request_verb ( 'STARTTLS' )
 #class StartTlsRequest ( Request ):
 #	def __init__ ( self ) -> None:
@@ -522,6 +523,7 @@ class _Auth ( Request ):
 	
 	def _server_protocol ( self, server: Server ) -> Iterator[Event]:
 		assert False # not used
+
 
 @auth_plugin ( 'PLAIN' )
 class AuthPlainRequest ( _Auth ):
@@ -599,24 +601,6 @@ class AuthLoginRequest ( _Auth ):
 		else:
 			yield from server.on_authenticate ( uid, pwd )
 
-#class AuthPlugin_Login ( AuthPlugin ):
-#	uid: Opt[str] = None
-#	
-#	def first_line ( self, extra: str ) -> AuthPluginStatus:
-#		#log = logger.getChild ( 'AuthPlugin_Login.first_line' )
-#		return AuthPluginStatus_Reply ( 334, b64_encode ( 'Username:' ) )
-#	
-#	def receive_line ( self, line: bytes ) -> AuthPluginStatus:
-#		#log = logger.getChild ( 'AuthPlugin_Login.receive_line' )
-#		if self.uid is None:
-#			self.uid = b2s ( base64.b64decode ( line ) )
-#			return AuthPluginStatus_Reply ( 334, b64_encode ( 'Password:' ) )
-#		else:
-#			assert isinstance ( self.uid, str )
-#			uid: str = self.uid
-#			pwd = b2s ( base64.b64decode ( line ) )
-#			return AuthPluginStatus_Credentials ( uid, pwd )
-
 
 class ExpnVrfyRequest ( Request ):
 	_verb: str
@@ -655,17 +639,20 @@ class ExpnVrfyRequest ( Request ):
 			event = self._event ( self.mailbox )
 			yield from server.on_expnvrfy ( event )
 
+
 @request_verb ( 'EXPN' )
 class ExpnRequest ( ExpnVrfyRequest ):
 	_verb = 'EXPN'
 	_response = ExpnResponse
 	_event = ExpnEvent
 
+
 @request_verb ( 'VRFY' )
 class VrfyRequest ( ExpnVrfyRequest ):
 	_verb = 'VRFY'
 	_response = VrfyResponse
 	_event = VrfyEvent
+
 
 @request_verb ( 'MAIL' )
 class MailFromRequest ( Request ):
@@ -688,6 +675,7 @@ class MailFromRequest ( Request ):
 			yield ResponseEvent ( 513, 'Must authenticate' )
 		else:
 			yield from server.on_mail_from ( self.mail_from )
+
 
 @request_verb ( 'RCPT' )
 class RcptToRequest ( Request ):
@@ -781,6 +769,7 @@ class RsetRequest ( Request ):
 		server.reset()
 		yield ResponseEvent ( 250, 'OK' )
 
+
 @request_verb ( 'NOOP' )
 class NoOpRequest ( Request ):
 	@classmethod
@@ -792,6 +781,7 @@ class NoOpRequest ( Request ):
 	
 	def _server_protocol ( self, server: Server ) -> Iterator[Event]:
 		yield ResponseEvent ( 250, 'OK' )
+
 
 @request_verb ( 'QUIT' )
 class QuitRequest ( Request ):

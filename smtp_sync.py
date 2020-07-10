@@ -73,24 +73,17 @@ class Client ( metaclass = ABCMeta ):
 	
 	def _recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._recv' )
-		log.debug ( f'{request=}' )
 		while not request.response:
-			log.debug ( f'(waiting for data)' )
 			data: bytes = self._read()
 			log.debug ( f'S>{b2s(data).rstrip()}' )
 			for event in self.cli.receive ( data ):
-				log.debug ( f'handling {event=}' )
 				self._event ( event )
-		log.debug ( f'{request!r} -> {request.response!r}' )
 		return request.response
 	
 	def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._send_recv' )
-		log.debug ( f'submitting {request=}' )
 		for event in self.cli.send ( request ):
-			log.debug ( f'handling {event=}' )
 			self._event ( event )
-		log.debug ( f'calling _recv ( {request=} )' )
 		return self._recv ( request )
 	
 	@abstractmethod

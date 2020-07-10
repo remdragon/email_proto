@@ -78,7 +78,6 @@ class Client ( metaclass = ABCMeta ):
 			log.debug ( f'S>{b2s(data).rstrip()}' )
 			for event in self.cli.receive ( data ):
 				await self._event ( event )
-		log.debug ( f'{request=} -> {request.response=}' )
 		return request.response
 	
 	async def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
