@@ -45,6 +45,16 @@ class Tests ( unittest.TestCase ):
 				)
 				
 				self.assertEqual (
+					repr ( cli.expn ( 'mike' ) ),
+					"smtp_proto.ExpnResponse(250, 'mike@abc.com')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.vrfy ( 'users-hackers' ) ),
+					"smtp_proto.VrfyResponse(250, 'carol@abc.com', 'greg@abc.com', 'marcha@abc.com', 'peter@abc.com')",
+				)
+				
+				self.assertEqual (
 					repr ( cli.mail_from ( 'from@test.com' ) ),
 					"smtp_proto.SuccessResponse(250, 'OK')",
 				)
@@ -70,8 +80,6 @@ class Tests ( unittest.TestCase ):
 					"smtp_proto.SuccessResponse(250, 'OK')",
 				)
 			
-			except smtp_proto.ErrorResponse as e: # pragma: no cover
-				log.error ( f'server error: {e=}' )
 			except smtp_proto.Closed as e: # pragma: no cover
 				log.debug ( f'server closed connection: {e=}' )
 			finally:
@@ -83,6 +91,20 @@ class Tests ( unittest.TestCase ):
 				class TestServer ( smtp_socket.Server ):
 					def on_starttls_request ( self, event: smtp_proto.StartTlsRequestEvent ) -> None:
 						event.accept()
+					
+					def on_expnvrfy ( self, event: smtp_proto.ExpnVrfyEvent ) -> None:
+						if event.mailbox == 'mike':
+							event.accept ( 'mike@abc.com' )
+						elif event.mailbox == 'users-hackers':
+							event.accept ( 'carol@abc.com', 'greg@abc.com', 'marcha@abc.com', 'peter@abc.com' ) # sheesh, someone was a Brady's Bunch fan
+						else:
+							event.reject()
+					
+					def on_expn ( self, event: smtp_proto.ExpnEvent ) -> None:
+						self.on_expnvrfy ( event )
+					
+					def on_vrfy ( self, event: smtp_proto.VrfyEvent ) -> None:
+						self.on_expnvrfy ( event )
 					
 					def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None:
 						if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':

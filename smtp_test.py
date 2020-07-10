@@ -88,19 +88,16 @@ class Tests ( unittest.TestCase ):
 			self.assertEqual ( evt2._code, smtp_proto.AuthEvent.error_code )
 			self.assertEqual ( evt2._message, smtp_proto.AuthEvent.error_message )
 		
-		srv = smtp_proto.Server ( 'localhost' )
-		ss = smtp_proto.ServerState()
-		x = list ( ss.receive_line ( srv, b'FREE BEER\r\n' ) )
-		self.assertEqual ( repr ( x ), "[smtp_proto.SendDataEvent(data=b'500 command not recognized or not available: FREE\\r\\n')]" )
+		#srv = smtp_proto.Server ( 'localhost' )
+		#ss = smtp_proto.ServerState()
+		#x = list ( ss.receive_line ( srv, b'FREE BEER\r\n' ) )
+		#self.assertEqual ( repr ( x ), "[smtp_proto.SendDataEvent(data=b'500 command not recognized or not available: FREE\\r\\n')]" )
 		
 		evt = smtp_proto.Event()
 		self.assertEqual ( repr ( evt ), 'smtp_proto.Event()' )
 		
 		evt = smtp_proto.CompleteEvent ( 'from@test.com', [ 'to@test.com' ], b'' )
 		self.assertEqual ( repr ( evt ), 'smtp_proto.CompleteEvent(_acceptance=None, _code=None, _message=None)' )
-		
-		#evt = smtp_proto.ErrorEvent ( 500, 'Brittney Spears concert sold out' )
-		#self.assertEqual ( repr ( evt ), "smtp_proto.ErrorEvent(code=500, message='Brittney Spears concert sold out')" )
 		
 		evt = smtp_proto.AuthEvent ( 'Zaphod', 'Beeblebrox' )
 		self.assertEqual ( repr ( evt ), "smtp_proto.AuthEvent(uid='Zaphod')" ) # <-- intentionally not showing pwd
@@ -111,23 +108,23 @@ class Tests ( unittest.TestCase ):
 		evt = smtp_proto.RcptToEvent ( 'ford@prefect.com' )
 		self.assertEqual ( repr ( evt ), "smtp_proto.RcptToEvent(rcpt_to='ford@prefect.com')" )
 		
-		class AuthPluginStatus_Broken ( smtp_proto.AuthPluginStatus ):
-			def _resolve ( self, server: smtp_proto.Server ) -> Iterator[smtp_proto.Event]:
-				yield from super()._resolve ( server )
-		x = AuthPluginStatus_Broken()
-		with self.assertRaises ( NotImplementedError ):
-			list ( x._resolve ( None ) )
+		#class AuthPluginStatus_Broken ( smtp_proto.AuthPluginStatus ):
+		#	def _resolve ( self, server: smtp_proto.Server ) -> Iterator[smtp_proto.Event]:
+		#		yield from super()._resolve ( server )
+		#x = AuthPluginStatus_Broken()
+		#with self.assertRaises ( NotImplementedError ):
+		#	list ( x._resolve ( None ) )
 		
-		class AuthPlugin_Broken ( smtp_proto.AuthPlugin ):
-			def first_line ( self, extra: str ) -> smtp_proto.AuthPluginStatus:
-				return super().first_line ( extra )
-			def receive_line ( self, line: bytes ) -> smtp_proto.AuthPluginStatus:
-				return super().receive_line ( line )
-		x = AuthPlugin_Broken()
-		with self.assertRaises ( NotImplementedError ):
-			x.first_line ( '' )
-		with self.assertRaises ( NotImplementedError ):
-			x.receive_line ( b'' )
+		#class AuthPlugin_Broken ( smtp_proto.AuthPlugin ):
+		#	def first_line ( self, extra: str ) -> smtp_proto.AuthPluginStatus:
+		#		return super().first_line ( extra )
+		#	def receive_line ( self, line: bytes ) -> smtp_proto.AuthPluginStatus:
+		#		return super().receive_line ( line )
+		#x = AuthPlugin_Broken()
+		#with self.assertRaises ( NotImplementedError ):
+		#	x.first_line ( '' )
+		#with self.assertRaises ( NotImplementedError ):
+		#	x.receive_line ( b'' )
 		
 		self.assertEqual (
 			smtp_proto._auth_lines ( 'Neque porro quisquam est qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit...'.split() ),

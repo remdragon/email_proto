@@ -37,25 +37,26 @@ class Tests ( unittest.TestCase ):
 						'8BITMIME',
 						'AUTH PLAIN LOGIN',
 						'PIPELINING',
+						'STARTTLS',
 						'milliways.local greets localhost',
 					] )
 					self.assertTrue ( r.esmtp_8bitmime )
 					self.assertEqual ( sorted ( r.esmtp_auth ), [ 'LOGIN', 'PLAIN' ] )
 					self.assertTrue ( r.esmtp_pipelining )
-					self.assertFalse ( r.esmtp_starttls )
+					self.assertTrue ( r.esmtp_starttls )
 					
 					with self.assertRaises ( smtp_proto.ErrorResponse ):
 						try:
 							await cli.helo ( 'localhost' )
 						except smtp_proto.ErrorResponse as e:
-							self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'you already said HELO')" )
+							self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'you already said HELO RFC1869#4.2')" )
 							raise
 					
 					with self.assertRaises ( smtp_proto.ErrorResponse ):
 						try:
 							await cli.ehlo ( 'localhost' )
 						except smtp_proto.ErrorResponse as e:
-							self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'you already said HELO')" )
+							self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'you already said HELO RFC1869#4.2')" )
 							raise
 					self.assertEqual ( repr ( await cli.rset() ), "smtp_proto.SuccessResponse(250, 'OK')" )
 					
@@ -67,6 +68,8 @@ class Tests ( unittest.TestCase ):
 							def _client_protocol ( self ) -> Iterator[smtp_proto.Event]:
 								log = logger.getChild ( 'AuthFubarRequest._client_protocol' )
 								yield from smtp_proto._client_proto_send_recv_done ( f'AUTH FUBAR\r\n' )
+							def _server_protocol ( self, server: smtp_proto.Server ) -> Iterator[smtp_proto.Event]:
+								assert False
 						with self.assertRaises ( smtp_proto.ErrorResponse ):
 							try:
 								await cli._send_recv ( AuthFubarRequest() )

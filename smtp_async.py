@@ -12,14 +12,14 @@ b2s = smtp_proto.b2s
 class Client ( metaclass = ABCMeta ):
 	cli: smtp_proto.Client
 	
-	async def _connect ( self ) -> smtp_proto.Response:
+	async def _connect ( self ) -> smtp_proto.SuccessResponse:
 		self.cli = smtp_proto.Client()
 		return await self.greeting()
 	
-	async def greeting ( self ) -> smtp_proto.Response:
+	async def greeting ( self ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.GreetingRequest() )
 	
-	async def helo ( self, local_hostname: str ) -> smtp_proto.Response:
+	async def helo ( self, local_hostname: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.HeloRequest ( local_hostname ) )
 	
 	async def ehlo ( self, local_hostname: str ) -> smtp_proto.EhloResponse:
@@ -27,42 +27,40 @@ class Client ( metaclass = ABCMeta ):
 		assert isinstance ( r, smtp_proto.EhloResponse ), f'invalid {r=}'
 		return r
 	
-	async def starttls ( self ) -> smtp_proto.Response:
+	async def starttls ( self ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.StartTlsRequest() )
 	
-	async def auth_plain1 ( self, uid: str, pwd: str ) -> smtp_proto.Response:
+	async def auth_plain1 ( self, uid: str, pwd: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.AuthPlain1Request ( uid, pwd ) )
 	
-	async def auth_plain2 ( self, uid: str, pwd: str ) -> smtp_proto.Response:
+	async def auth_plain2 ( self, uid: str, pwd: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.AuthPlain2Request ( uid, pwd ) )
 	
-	async def auth_login ( self, uid: str, pwd: str ) -> smtp_proto.Response:
+	async def auth_login ( self, uid: str, pwd: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.AuthLoginRequest ( uid, pwd ) )
 	
-	async def expn ( self, maillist: str ) -> smtp_proto.Response:
-		log = logger.getChild ( 'Client.expn' )
-		log.debug ( f'{maillist=}' )
-		return await self._send_recv ( smtp_proto.ExpnRequest ( maillist ) )
-	
-	async def vrfy ( self, mailbox: str ) -> smtp_proto.Response:
+	async def expn ( self, mailbox: str ) -> smtp_proto.ExpnResponse:
 		return await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
 	
-	async def mail_from ( self, email: str ) -> smtp_proto.Response:
+	async def vrfy ( self, mailbox: str ) -> smtp_proto.SuccessResponse:
+		return await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+	
+	async def mail_from ( self, email: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.MailFromRequest ( email ) )
 	
-	async def rcpt_to ( self, email: str ) -> smtp_proto.Response:
+	async def rcpt_to ( self, email: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.RcptToRequest ( email ) )
 	
-	async def data ( self, content: bytes ) -> smtp_proto.Response:
+	async def data ( self, content: bytes ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.DataRequest ( content ) )
 	
-	async def rset ( self ) -> smtp_proto.Response:
+	async def rset ( self ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.RsetRequest() )
 	
-	async def noop ( self ) -> smtp_proto.Response:
+	async def noop ( self ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.NoOpRequest() )
 	
-	async def quit ( self ) -> smtp_proto.Response:
+	async def quit ( self ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.QuitRequest() )
 	
 	async def _event ( self, event: smtp_proto.Event ) -> None:
@@ -70,12 +68,10 @@ class Client ( metaclass = ABCMeta ):
 		if isinstance ( event, smtp_proto.SendDataEvent ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			await self._write ( event.data )
-		#elif isinstance ( event, smtp_proto.ErrorEvent ):
-		#	raise smtp_proto.ErrorResponse ( event.code, event.message )
 		else:
 			assert False, f'unrecognized {event=}'
 	
-	async def _recv ( self, request: smtp_proto.Request ) -> smtp_proto.Response:
+	async def _recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._recv' )
 		while not request.response:
 			data: bytes = await self._read()
@@ -85,7 +81,7 @@ class Client ( metaclass = ABCMeta ):
 		log.debug ( f'{request=} -> {request.response=}' )
 		return request.response
 	
-	async def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.Response:
+	async def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._send_recv' )
 		for event in self.cli.send ( request ):
 			await self._event ( event )
@@ -128,6 +124,12 @@ class Server ( metaclass = ABCMeta ):
 	async def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_authenticate()' )
+	
+	async def on_expn ( self, event: smtp_proto.ExpnEvent ) -> None:
+		event.reject() # NOTE: it isn't required to implement this. The default behavior is to report '550 Access Denied!'
+	
+	async def on_vrfy ( self, event: smtp_proto.VrfyEvent ) -> None:
+		event.reject() # NOTE: it isn't required to implement this. The default behavior is to report '550 Access Denied!'
 	
 	@abstractmethod
 	async def on_mail_from ( self, event: smtp_proto.MailFromEvent ) -> None: # pragma: no cover
@@ -177,8 +179,10 @@ class Server ( metaclass = ABCMeta ):
 						await self.on_mail_from ( event )
 					elif isinstance ( event, smtp_proto.CompleteEvent ):
 						await self.on_complete ( event )
-					#elif isinstance ( event, smtp_proto.ErrorEvent ):
-					#	raise smtp_proto.ErrorResponse ( event.code, event.message )
+					elif isinstance ( event, smtp_proto.ExpnEvent ):
+						await self.on_expn ( event )
+					elif isinstance ( event, smtp_proto.VrfyEvent ):
+						await self.on_vrfy ( event )
 					else:
 						assert False, f'unrecognized {event=}'
 		except smtp_proto.Closed:

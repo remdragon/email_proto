@@ -18,7 +18,10 @@ class Transport:
 	
 	async def _read ( self ) -> bytes:
 		#log = logger.getChild ( 'Transport._read' )
-		return await self.rx.readline()
+		try:
+			return await self.rx.readline()
+		except asyncio.IncompleteReadError:
+			raise smtp_proto.Closed()
 	
 	async def _write ( self, data: bytes ) -> None:
 		#log = logger.getChild ( 'Transport._write' )

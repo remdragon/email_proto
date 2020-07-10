@@ -40,6 +40,7 @@ class Tests ( unittest.TestCase ):
 					self.assertEqual ( r.code, 250 )
 					self.assertEqual ( sorted ( r.lines ), [
 						'AUTH PLAIN LOGIN',
+						'STARTTLS',
 						'milliways.local greets localhost',
 					] )
 					
