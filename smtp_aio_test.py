@@ -86,7 +86,7 @@ class Tests ( unittest.TestCase ):
 				log = logger.getChild ( 'main.server_task' )
 				try:
 					class TestServer ( smtp_aio.Server ):
-						async def on_starttls_request ( self, event: smtp_proto.StartTlsRequestEvent ) -> None:
+						async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
 							event.reject() # not implemented yet
 						
 						async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:

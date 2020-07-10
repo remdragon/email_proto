@@ -89,7 +89,7 @@ class Tests ( unittest.TestCase ):
 			log = logger.getChild ( 'test_auth_plain1.server_task' )
 			try:
 				class TestServer ( smtp_socket.Server ):
-					def on_starttls_request ( self, event: smtp_proto.StartTlsRequestEvent ) -> None:
+					def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
 						event.accept()
 					
 					def on_expnvrfy ( self, event: smtp_proto.ExpnVrfyEvent ) -> None:

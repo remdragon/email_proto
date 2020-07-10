@@ -110,9 +110,9 @@ class Server ( metaclass = ABCMeta ):
 		self.hostname = hostname
 	
 	@abstractmethod
-	async def on_starttls_request ( self, event: smtp_proto.StartTlsRequestEvent ) -> None: # pragma: no cover
+	async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_starttls_request()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_starttls_accept()' )
 	
 	@abstractmethod
 	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
@@ -168,8 +168,8 @@ class Server ( metaclass = ABCMeta ):
 						await _send ( event.data )
 					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
 						await self.on_rcpt_to ( event )
-					elif isinstance ( event, smtp_proto.StartTlsRequestEvent ):
-						await self.on_starttls_request ( event )
+					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
+						await self.on_starttls_accept ( event )
 					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
 						await self.on_starttls_begin ( event )
 					elif isinstance ( event, smtp_proto.AuthEvent ):

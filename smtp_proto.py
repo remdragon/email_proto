@@ -123,7 +123,7 @@ class AcceptRejectEvent ( Event ):
 		return f'{cls.__module__}.{cls.__name__}({args})'
 
 
-class StartTlsRequestEvent ( AcceptRejectEvent ):
+class StartTlsAcceptEvent ( AcceptRejectEvent ):
 	success_code = 220
 	success_message = 'Go ahead, make my day'
 	error_code = 454
@@ -303,7 +303,7 @@ def _client_proto_send ( line: str ) -> Iterator[Event]:
 	yield SendDataEvent ( s2b ( line ) )
 
 def _client_proto_recv ( event: NeedDataEvent ) -> Iterator[Event]:
-	yield event.reset()
+	yield event
 	event.response = Response.parse ( event.data )
 
 def _client_proto_recv_done() -> Iterator[Event]:
@@ -485,17 +485,25 @@ class EhloRequest ( Request ):
 			yield ResponseEvent ( 250, *lines )
 
 
-#@request_verb ( 'STARTTLS' )
-#class StartTlsRequest ( Request ):
-#	def __init__ ( self ) -> None:
-#		pass
-#	
-#	def send_data ( self ) -> Iterator[SendDataEvent]:
-#		#log = logger.getChild ( 'Request.send_data' )
-#		yield SendDataEvent ( s2b ( f'{self.line}\r\n' ) )
-#	
-#	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
-#		yield StartTlsBeginEvent()
+@request_verb ( 'STARTTLS' )
+class StartTlsRequest ( Request ):
+	@classmethod
+	def parse ( cls: Type[StartTlsRequest], extra: str ) -> StartTlsRequest:
+		return cls()
+	
+	def _client_protocol ( self ) -> Iterator[Event]:
+		#log = logger.getChild ( 'StartTlsRequest._client_protocol' )
+		yield from _client_proto_send_ok ( 'STARTTLS\r\n' )
+		yield StartTlsBeginEvent()
+	
+	def _server_protocol ( self, server: Server ) -> Iterator[Event]:
+		event1 = StartTlsAcceptEvent()
+		yield event1
+		accepted, code, message = event1._accepted()
+		yield ResponseEvent ( code, message )
+		if not accepted:
+			return
+		yield StartTlsBeginEvent()
 
 
 @request_verb ( 'AUTH' )
@@ -521,7 +529,7 @@ class _Auth ( Request ):
 	def _client_protocol ( self ) -> Iterator[Event]: # pragma: no cover
 		assert False # not used
 	
-	def _server_protocol ( self, server: Server ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server ) -> Iterator[Event]: # pragma: no cover
 		assert False # not used
 
 
@@ -590,10 +598,10 @@ class AuthLoginRequest ( _Auth ):
 		event = NeedDataEvent()
 		try:
 			yield ResponseEvent ( 334, b64_encode ( 'Username:' ) )
-			yield event.reset()
+			yield event
 			uid = b2s ( base64.b64decode ( event.data or b'' ) ).rstrip()
 			yield ResponseEvent ( 334, b64_encode ( 'Password:' ) )
-			yield event.reset()
+			yield event
 			pwd = b2s ( base64.b64decode ( event.data or b'' ) ).rstrip()
 		except Exception as e:
 			log.error ( f'{e=}' )
@@ -674,7 +682,12 @@ class MailFromRequest ( Request ):
 		if not server.auth_mailbox:
 			yield ResponseEvent ( 513, 'Must authenticate' )
 		else:
-			yield from server.on_mail_from ( self.mail_from )
+			event = MailFromEvent ( self.mail_from )
+			yield event
+			accepted, code, message = event._accepted()
+			if accepted:
+				server.mail_from = self.mail_from
+			yield ResponseEvent ( code, message )
 
 
 @request_verb ( 'RCPT' )
@@ -697,7 +710,12 @@ class RcptToRequest ( Request ):
 		if not server.auth_mailbox:
 			yield ResponseEvent ( 513, 'Must authenticate' )
 		else:
-			yield from server.on_rcpt_to ( self.rcpt_to )
+			event = RcptToEvent ( self.rcpt_to )
+			yield event
+			accepted, code, message = event._accepted()
+			if accepted:
+				server.rcpt_to.append ( self.rcpt_to )
+			yield ResponseEvent ( code, message )
 
 
 @request_verb ( 'DATA' )
@@ -745,7 +763,7 @@ class DataRequest ( Request ):
 			yield ResponseEvent ( 354, 'Start mail input; end with <CRLF>.<CRLF>' )
 			event = NeedDataEvent()
 			while True:
-				yield event.reset()
+				yield event
 				line = event.data or b''
 				if line == b'.\r\n':
 					yield from server.on_complete()
@@ -847,7 +865,7 @@ class Connection ( metaclass = ABCMeta ):
 				event = next ( self.request_protocol )
 				#log.debug ( f'{event=}' )
 				if isinstance ( event, NeedDataEvent ):
-					self.need_data = event
+					self.need_data = event.reset()
 					return
 				else:
 					yield event
@@ -869,8 +887,18 @@ class Connection ( metaclass = ABCMeta ):
 			self.request_protocol = None
 			yield event
 		except StopIteration:
-			if isinstance ( self, Client ): # it's okay for server protocol to exit
-				log.exception ( 'request protocol exited without response' )
+			# client protocol *must* raise a ResponseEvent *or* set it's response attribute before exiting
+			# if not, the smtp_[a]sync.Client._recv() will get stuck waiting for data that never arrives
+			# NOTE: we could auto-set some kind of failure response, but I prefer to fail loudly b/c this condition would be a bug inside smtp_proto
+			assert (
+				isinstance ( self, Server )
+			or
+				isinstance ( self.request.response, ResponseEvent )
+			), (
+				f'INTERNAL ERROR:'
+				f' {type(self.request).__module__}.{type(self.request).__name__}'
+				f'._client_protocol() exit w/o response'
+			)
 			self.request = None
 			self.request_protocol = None
 
@@ -944,16 +972,6 @@ class Server ( Connection ):
 		self.rcpt_to = []
 		self.data = []
 	
-	def on_starttls ( self ) -> Iterator[Event]:
-		event1 = StartTlsRequestEvent()
-		yield event1
-		accepted, code, message = event1._accepted()
-		if not accepted:
-			yield ResponseEvent ( code, message )
-			return
-		event2 = StartTlsBeginEvent()
-		yield event2
-	
 	def on_authenticate ( self, uid: str, pwd: str ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Server.on_authenticate' )
 		event = AuthEvent ( uid, pwd )
@@ -972,23 +990,6 @@ class Server ( Connection ):
 		else:
 			assert event._message is not None
 			yield ResponseEvent ( event._code, event._message )
-	
-	def on_mail_from ( self, mail_from: str ) -> Iterator[Event]:
-		assert isinstance ( mail_from, str ), f'invalid {mail_from=}'
-		event = MailFromEvent ( mail_from )
-		yield event
-		accepted, code, message = event._accepted()
-		if accepted:
-			self.mail_from = mail_from
-		yield ResponseEvent ( code, message )
-	
-	def on_rcpt_to ( self, rcpt_to: str ) -> Iterator[Event]:
-		event = RcptToEvent ( rcpt_to )
-		yield event
-		accepted, code, message = event._accepted()
-		if accepted:
-			self.rcpt_to.append ( rcpt_to )
-		yield ResponseEvent ( code, message )
 	
 	def on_complete ( self ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Server.complete' )
