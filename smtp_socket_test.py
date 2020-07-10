@@ -17,7 +17,15 @@ logger = logging.getLogger ( __name__ )
 
 b2s = smtp_proto.b2s
 
-trust = itrustme.ServerOnly ( server_hostname = 'milliways.local' )
+if False:
+	trust = itrustme.ClientServer (
+		client_hostname = 'zaphod@milliways.local',
+		server_hostname = 'milliways.local',
+	)
+else:
+	trust = itrustme.ServerOnly (
+		server_hostname = 'milliways.local',
+	)
 
 class Tests ( unittest.TestCase ):
 	def test_auth_plain1 ( self ) -> None:
