@@ -68,6 +68,8 @@ class Client ( metaclass = ABCMeta ):
 		if isinstance ( event, smtp_proto.SendDataEvent ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			await self._write ( event.data )
+		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
+			await self.on_starttls_begin ( event )
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -98,6 +100,11 @@ class Client ( metaclass = ABCMeta ):
 	
 	@abstractmethod
 	async def _close ( self ) -> None:
+		cls = type ( self )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+	
+	@abstractmethod
+	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
 

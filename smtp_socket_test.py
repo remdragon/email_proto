@@ -1,8 +1,11 @@
 # system imports;
+from functools import partial
 import logging
 import socket
+import ssl
 import sys
 import threading
+import trustme # pip install trustme
 import unittest
 
 # mail_proto imports:
@@ -13,6 +16,9 @@ logger = logging.getLogger ( __name__ )
 
 b2s = smtp_proto.b2s
 
+ca = trustme.CA()
+server_cert = ca.issue_cert ( 'milliways.local' )
+
 class Tests ( unittest.TestCase ):
 	def test_auth_plain1 ( self ) -> None:
 		thing1, thing2 = socket.socketpair()
@@ -22,6 +28,9 @@ class Tests ( unittest.TestCase ):
 			try:
 				cli = smtp_socket.Client()
 				
+				cli.server_hostname = 'milliways.local'
+				cli.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
+				ca.configure_trust ( cli.ssl_context )
 				cli.sock = sock
 				
 				self.assertEqual (
@@ -34,10 +43,10 @@ class Tests ( unittest.TestCase ):
 					"smtp_proto.SuccessResponse(250, 'milliways.local greets localhost')",
 				)
 				
-				#self.assertEqual (
-				#	repr ( cli.starttls() ),
-				#	"smtp_proto.SuccessResponse(250, 'Go ahead, make my day')",
-				#)
+				self.assertEqual (
+					repr ( cli.starttls() ),
+					"smtp_proto.SuccessResponse(220, 'Go ahead, make my day')",
+				)
 				
 				self.assertEqual (
 					repr ( cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' ) ),
@@ -82,6 +91,8 @@ class Tests ( unittest.TestCase ):
 			
 			except smtp_proto.Closed as e: # pragma: no cover
 				log.debug ( f'server closed connection: {e=}' )
+			except Exception:
+				log.exception ( 'Unexpected client_task exception:' )
 			finally:
 				sock.close()
 		
@@ -128,14 +139,22 @@ class Tests ( unittest.TestCase ):
 				
 				srv = TestServer ( 'milliways.local' )
 				
+				srv.ssl_context = ssl.create_default_context()
+				srv.ssl_context.check_hostname = False
+				server_cert.configure_cert ( srv.ssl_context )
+				ca.configure_trust ( srv.ssl_context )
+				srv.ssl_context.verify_mode = ssl.CERT_NONE
+				
 				srv.run ( sock )
 			except smtp_proto.Closed:
 				pass
+			except Exception:
+				log.exception ( 'Unexpected server_task exception:' )
 			finally:
 				sock.close()
 		
-		thread1 = threading.Thread ( target = client_task, args = ( thing1, ) )
-		thread2 = threading.Thread ( target = server_task, args = ( thing2, ) )
+		thread1 = threading.Thread ( target = partial ( client_task, thing1 ), name = 'SocketClientThread' )
+		thread2 = threading.Thread ( target = partial ( server_task, thing2 ), name = 'SocketServerThread' )
 		
 		thread1.start()
 		thread2.start()

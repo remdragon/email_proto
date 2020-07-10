@@ -66,7 +66,7 @@ class Tests ( unittest.TestCase ):
 			evts = list ( conn.receive ( b'X' * smtp_proto._MAXLINE ) )
 		
 		if False: # the following test may no longer be valid due to client proto refactor
-			cli = smtp_proto.Client() # ( smtp_proto.GreetingRequest() )
+			cli = smtp_proto.Client()
 			with self.assertRaises ( smtp_proto.Closed ):
 				try:
 					list ( cli._receive_line ( b'XXX_BAD_MEDICINE' ) )

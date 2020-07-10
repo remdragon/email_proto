@@ -50,6 +50,8 @@ class Event ( Exception ):
 		return f'{cls.__module__}.{cls.__name__}()'
 
 class SendDataEvent ( Event ):
+	exception: Opt[Exception] = None # TODO FIXME: BaseException?
+	
 	def __init__ ( self, data: bytes ) -> None:
 		assert isinstance ( data, bytes_types ) and len ( data ) > 0
 		self.data = data
@@ -127,7 +129,7 @@ class StartTlsAcceptEvent ( AcceptRejectEvent ):
 
 
 class StartTlsBeginEvent ( Event ):
-	pass
+	exception: Opt[Exception] = None
 
 
 class AuthEvent ( AcceptRejectEvent ):
@@ -295,7 +297,10 @@ class VrfyResponse ( ExpnVrfyResponse ):
 
 def _client_proto_send ( line: str ) -> Iterator[Event]:
 	assert line.endswith ( '\r\n' )
-	yield SendDataEvent ( s2b ( line ) )
+	event = SendDataEvent ( s2b ( line ) )
+	yield event
+	if event.exception is not None:
+		raise event.exception
 
 def _client_proto_recv ( event: NeedDataEvent ) -> Iterator[Event]:
 	yield event
@@ -311,11 +316,15 @@ def _client_proto_recv_done() -> Iterator[Event]:
 	log.debug ( f'{response=}' )
 	raise response
 
-def _client_proto_send_recv_ok ( line: str ) -> Iterator[Event]:
+def _client_proto_send_recv_ok ( line: str, request: Opt[Request] = None ) -> Iterator[Event]:
+	log = logger.getChild ( '_client_proto_send_recv_ok' )
 	yield from _client_proto_send ( line )
 	event = NeedDataEvent()
 	yield event
 	response = Response.parse ( event.data )
+	if request is not None:
+		log.debug ( f'{request=} {response=}' )
+		request.response = response
 	if not isinstance ( response, SuccessResponse ):
 		raise response
 
@@ -468,17 +477,21 @@ class EhloRequest ( Request ):
 			lines.append ( line )
 		if server.esmtp_pipelining:
 			lines.append ( 'PIPELINING' )
-		if True: # TODO FIXME: don't advertise this if we're already tls
+		if True: # TODO FIXME: don't advertise this if we're already tls: RFC3207#4.2
 			lines.append ( 'STARTTLS' )
 		yield ResponseEvent ( 250, *lines )
 
 
 @request_verb ( 'STARTTLS' )
-class StartTlsRequest ( Request ):
+class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure SMTP over Transport Layer Security
 	def _client_protocol ( self ) -> Iterator[Event]:
-		#log = logger.getChild ( 'StartTlsRequest._client_protocol' )
-		yield from _client_proto_send_ok ( 'STARTTLS\r\n' )
-		yield StartTlsBeginEvent()
+		log = logger.getChild ( 'StartTlsRequest._client_protocol' )
+		yield from _client_proto_send_recv_ok ( 'STARTTLS\r\n', self )
+		log.debug ( f'{self.response=}' )
+		event = StartTlsBeginEvent()
+		yield event
+		if event.exception:
+			raise event.exception
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
 		if argtext:
@@ -489,7 +502,10 @@ class StartTlsRequest ( Request ):
 		yield ResponseEvent ( code, message )
 		if not accepted:
 			return
-		yield StartTlsBeginEvent()
+		event = StartTlsBeginEvent()
+		yield event
+		if event.exception:
+			raise event.exception
 
 
 @request_verb ( 'AUTH' )
@@ -526,7 +542,7 @@ class _Auth ( Request ):
 @auth_plugin ( 'PLAIN' )
 class AuthPlainRequest ( _Auth ):
 	def _client_protocol ( self ) -> Iterator[Event]: # pragma: no cover
-		assert False # client should use AuthPlain1Request or AuthPlain2Request below
+		assert False # use AuthPlain1Request or AuthPlain2Request below
 	
 	def _server_protocol ( self, server: Server, moreargtext: str ) -> Iterator[Event]:
 		log = logger.getChild ( 'AuthPlainRequest._server_protocol' )
@@ -850,10 +866,11 @@ class Connection ( metaclass = ABCMeta ):
 			# client protocol *must* raise a ResponseEvent *or* set it's response attribute before exiting
 			# if not, the smtp_[a]sync.Client._recv() will get stuck waiting for data that never arrives
 			# NOTE: we could auto-set some kind of failure response, but I prefer to fail loudly b/c this condition would be a bug inside smtp_proto
+			log.error ( f'{self=} {self.request=} {self.request.response=}' )
 			assert (
 				isinstance ( self, Server )
 			or
-				isinstance ( self.request.response, ResponseEvent )
+				isinstance ( self.request.response, Response )
 			), (
 				f'INTERNAL ERROR:'
 				f' {type(self.request).__module__}.{type(self.request).__name__}'
