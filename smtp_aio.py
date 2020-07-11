@@ -31,6 +31,10 @@ class Transport:
 	async def _close ( self ) -> None:
 		self.tx.close()
 		await self.tx.wait_closed()
+	
+	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+		#log = logger.getChild ( 'Client.on_starttls_begin' )
+		raise NotImplementedError
 
 
 class Client ( Transport, smtp_async.Client ):

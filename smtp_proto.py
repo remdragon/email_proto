@@ -49,8 +49,15 @@ class Event ( Exception ):
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}()'
 
-class SendDataEvent ( Event ):
+class ThrowableEvent ( Event ):
 	exception: Opt[Exception] = None # TODO FIXME: BaseException?
+	
+	def go ( self ) -> Iterator[Event]:
+		yield self
+		if self.exception:
+			raise self.exception
+
+class SendDataEvent ( ThrowableEvent ):
 	
 	def __init__ ( self, data: bytes ) -> None:
 		assert isinstance ( data, bytes_types ) and len ( data ) > 0
@@ -79,8 +86,8 @@ class AcceptRejectEvent ( Event ):
 	
 	def __init__ ( self ) -> None:
 		self._acceptance: Opt[bool] = None
-		self._code: Opt[int] = None
-		self._message: Opt[str] = None
+		self._code: int = self.error_code
+		self._message: str = self.error_message
 	
 	def accept ( self ) -> None:
 		#log = logger.getChild ( 'AcceptRejectEvent.accept' )
@@ -111,6 +118,11 @@ class AcceptRejectEvent ( Event ):
 		assert isinstance ( self._message, str )
 		return self._acceptance, self._code, self._message
 	
+	def go ( self ) -> Iterator[Event]:
+		yield self
+		if not self._acceptance:
+			raise ResponseEvent ( self._code, self._message )
+	
 	def __repr__ ( self ) -> str:
 		cls = type ( self )
 		args = ', '.join ( f'{k}={getattr(self,k)!r}' for k in (
@@ -128,8 +140,8 @@ class StartTlsAcceptEvent ( AcceptRejectEvent ):
 	error_message = 'TLS not available at the moment'
 
 
-class StartTlsBeginEvent ( Event ):
-	exception: Opt[Exception] = None
+class StartTlsBeginEvent ( ThrowableEvent ):
+	pass
 
 
 class AuthEvent ( AcceptRejectEvent ):
@@ -257,7 +269,7 @@ class Response ( Exception ):
 		return f'{cls.__module__}.{cls.__name__}({self.code!r}, {", ".join(map(repr,self.lines))})'
 
 
-class NeedDataEvent ( Event ):
+class NeedDataEvent ( ThrowableEvent ):
 	data: Opt[bytes] = None
 	response: Opt[Response] = None
 	
@@ -297,34 +309,25 @@ class VrfyResponse ( ExpnVrfyResponse ):
 
 def _client_proto_send ( line: str ) -> Iterator[Event]:
 	assert line.endswith ( '\r\n' )
-	event = SendDataEvent ( s2b ( line ) )
-	yield event
-	if event.exception is not None:
-		raise event.exception
+	yield from ( event := SendDataEvent ( s2b ( line ) ) ).go()
 
-def _client_proto_recv ( event: NeedDataEvent ) -> Iterator[Event]:
-	yield event
+def _client_proto_recv_ok ( event: NeedDataEvent ) -> Iterator[Event]:
+	yield from event.reset().go()
 	event.response = Response.parse ( event.data )
+	if isinstance ( event.response, ErrorResponse ):
+		raise event.response
 
 def _client_proto_recv_done() -> Iterator[Event]:
 	log = logger.getChild ( '_client_proto_recv_done' )
-	event = NeedDataEvent()
-	log.debug ( 'waiting for data' )
-	yield event
-	log.debug ( f'{event.data=}' )
+	yield from ( event := NeedDataEvent() ).go()
 	response = Response.parse ( event.data )
-	log.debug ( f'{response=}' )
 	raise response
 
-def _client_proto_send_recv_ok ( line: str, request: Opt[Request] = None ) -> Iterator[Event]:
+def _client_proto_send_recv_ok ( line: str ) -> Iterator[Event]:
 	log = logger.getChild ( '_client_proto_send_recv_ok' )
 	yield from _client_proto_send ( line )
-	event = NeedDataEvent()
-	yield event
+	yield from ( event := NeedDataEvent() ).go()
 	response = Response.parse ( event.data )
-	if request is not None:
-		log.debug ( f'{request=} {response=}' )
-		request.response = response
 	if not isinstance ( response, SuccessResponse ):
 		raise response
 
@@ -377,7 +380,7 @@ class Request ( metaclass = ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._client_protocol()' )
 	
 	@abstractmethod
-	def _server_protocol ( self, server: Server ) -> Iterator[Event]: # pragma: no cover
+	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._server_protocol()' )
 
@@ -396,7 +399,7 @@ class GreetingRequest ( Request ):
 		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
 		yield from _client_proto_recv_done()
 	
-	def _server_protocol ( self, server: Server ) -> Iterator[Event]: # pragma: no cover
+	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]: # pragma: no cover
 		assert False # this should never get called
 
 
@@ -437,11 +440,9 @@ class EhloRequest ( Request ):
 		esmtp_starttls: bool = False
 		
 		while True:
-			yield from _client_proto_recv ( event )
+			yield from _client_proto_recv_ok ( event )
 			tmp: Opt[Response] = event.response
 			assert tmp is not None
-			if isinstance ( tmp, ErrorResponse ):
-				raise tmp
 			line = tmp.lines[0]
 			lines.append ( line )
 			
@@ -485,27 +486,20 @@ class EhloRequest ( Request ):
 @request_verb ( 'STARTTLS' )
 class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure SMTP over Transport Layer Security
 	def _client_protocol ( self ) -> Iterator[Event]:
-		log = logger.getChild ( 'StartTlsRequest._client_protocol' )
-		yield from _client_proto_send_recv_ok ( 'STARTTLS\r\n', self )
-		log.debug ( f'{self.response=}' )
-		event = StartTlsBeginEvent()
-		yield event
-		if event.exception:
-			raise event.exception
+		#log = logger.getChild ( 'StartTlsRequest._client_protocol' )
+		yield from _client_proto_send_recv_ok ( 'STARTTLS\r\n' )
+		yield from ( event := StartTlsBeginEvent() ).go()
+		yield from _client_proto_recv_done()
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+		log = logger.getChild ( 'StartTlsRequest._server_protocol' )
 		if argtext:
 			raise ResponseEvent ( 501, 'Syntax error (no extra parameters allowed)' )
-		event1 = StartTlsAcceptEvent()
-		yield event1
-		accepted, code, message = event1._accepted()
-		yield ResponseEvent ( code, message )
-		if not accepted:
-			return
-		event = StartTlsBeginEvent()
-		yield event
-		if event.exception:
-			raise event.exception
+		yield from ( event1 := StartTlsAcceptEvent() ).go()
+		yield ResponseEvent ( event1._code, event1._message )
+		yield from StartTlsBeginEvent().go()
+		yield ResponseEvent ( 220, f'{server.hostname} ESMTP' )
+
 
 
 @request_verb ( 'AUTH' )
@@ -531,12 +525,9 @@ class _Auth ( Request ):
 		yield from plugin._server_protocol ( server, moreargtext[0] if moreargtext else '' )
 	
 	def _on_authenticate ( self, server: Server, uid: str, pwd: str ) -> Iterator[Event]:
-		event = AuthEvent ( uid, pwd )
-		yield event
-		accepted, code, message = event._accepted()
-		if accepted:
-			server.auth_mailbox = uid
-		yield ResponseEvent ( code, message )
+		yield from ( event := AuthEvent ( uid, pwd ) ).go()
+		server.auth_mailbox = uid
+		yield ResponseEvent ( event._code, event._message )
 
 
 @auth_plugin ( 'PLAIN' )
@@ -549,8 +540,7 @@ class AuthPlainRequest ( _Auth ):
 		try:
 			if not ( authtext := moreargtext ):
 				yield ResponseEvent ( 334, '' )
-				event = NeedDataEvent()
-				yield event
+				yield from ( event := NeedDataEvent() ).go()
 				authtext = b2s ( event.data or b'' ).rstrip()
 			_, uid, pwd = b64_decode ( authtext ).split ( '\0' )
 		except Exception as e:
@@ -617,11 +607,9 @@ class ExpnVrfyRequest ( Request ):
 		lines: List[str] = []
 		
 		while True:
-			yield from _client_proto_recv ( event )
+			yield from _client_proto_recv_ok ( event )
 			tmp: Opt[Response] = event.response
 			assert tmp is not None
-			if isinstance ( tmp, ErrorResponse ):
-				raise tmp
 			lines.append ( tmp.lines[0] )
 			if isinstance ( tmp, SuccessResponse ):
 				raise self._response ( tmp.code, *lines )
@@ -721,13 +709,13 @@ class DataRequest ( Request ):
 		for m in _r_crlf_dot.finditer ( payload ):
 			start = m.start()
 			chunk = payload[last:start] # TODO FIXME: performance concern: does this copy or is it a view?
-			log.debug ( f'{last=} {start=} {chunk=} {stitch=}' )
+			#log.debug ( f'{last=} {start=} {chunk=} {stitch=}' )
 			yield SendDataEvent ( chunk )
 			yield SendDataEvent ( stitch )
 			last = start + 3
 		tail = payload[last:]
 		if tail:
-			log.debug ( f'{last=} {tail=}' )
+			#log.debug ( f'{last=} {tail=}' )
 			yield SendDataEvent ( tail )
 		yield from _client_proto_send_recv_done ( '\r\n.\r\n' )
 	
@@ -741,20 +729,20 @@ class DataRequest ( Request ):
 		if not server.rcpt_to:
 			raise ResponseEvent ( 503, 'no rcpt address(es) received yet' )
 		yield ResponseEvent ( 354, 'Start mail input; end with <CRLF>.<CRLF>' )
-		event = NeedDataEvent()
+		event1 = NeedDataEvent()
 		while True:
-			yield event
-			line = event.data or b''
+			yield from event1.go()
+			line = event1.data or b''
 			if line == b'.\r\n':
 				break
 			elif line.startswith ( b'.' ):
 				server.data.append ( line[1:] )
 			else:
 				server.data.append ( line )
-		event = CompleteEvent ( server.mail_from, server.rcpt_to, server.data )
-		server.reset()
-		yield event
-		accepted, code, message = event._accepted()
+		event2 = CompleteEvent ( server.mail_from, server.rcpt_to, server.data )
+		server.reset() # is this correct? reset even if we're going to return an error?
+		yield event2
+		_, code, message = event2._accepted()
 		yield ResponseEvent ( code, message )
 
 
@@ -841,41 +829,41 @@ class Connection ( metaclass = ABCMeta ):
 				event = next ( self.request_protocol )
 				#log.debug ( f'{event=}' )
 				if isinstance ( event, NeedDataEvent ):
+					if self.request.response is not None: # pragma: no cover
+						log.warning ( f'INTERNAL ERROR - {self.request!r} pushed NeedDataEvent but has a response set - this can cause upstack deadlock ({self.request.response!r})' )
+						self.request.response = None
 					self.need_data = event.reset()
 					return
 				else:
 					yield event
 		except Closed as e:
-			log.debug ( f'protocol indicated connection closure: {e=}' )
+			#log.debug ( f'protocol indicated connection closure: {e=}' )
 			self.request = None
 			self.request_protocol = None
 			raise
 		except Response as response: # client protocol
-			log.debug ( f'protocol finished with {response=}' )
+			#log.debug ( f'protocol finished with {response=}' )
 			self.request.response = response
 			self.request = None
 			self.request_protocol = None
 			if isinstance ( response, ErrorResponse ):
 				raise
 		except SendDataEvent as event: # server protocol
-			log.debug ( f'protocol finished with {event=}' )
+			#log.debug ( f'protocol finished with {event=}' )
 			self.request = None
 			self.request_protocol = None
 			yield event
 		except StopIteration:
 			# client protocol *must* raise a ResponseEvent *or* set it's response attribute before exiting
 			# if not, the smtp_[a]sync.Client._recv() will get stuck waiting for data that never arrives
-			# NOTE: we could auto-set some kind of failure response, but I prefer to fail loudly b/c this condition would be a bug inside smtp_proto
-			log.error ( f'{self=} {self.request=} {self.request.response=}' )
-			assert (
-				isinstance ( self, Server )
-			or
-				isinstance ( self.request.response, Response )
-			), (
-				f'INTERNAL ERROR:'
-				f' {type(self.request).__module__}.{type(self.request).__name__}'
-				f'._client_protocol() exit w/o response'
-			)
+			if not self.request.response and isinstance ( self, Client ): # pragma: no cover
+				log.warning (
+					f'INTERNAL ERROR:'
+					f' {type(self.request).__module__}.{type(self.request).__name__}'
+					f'._client_protocol() exit w/o response - this can cause upstack deadlock'
+				)
+				self.request.response = ErrorResponse ( 500, 'INTERNAL PROTOCOL IMPLEMENTATION ERROR' )
+			#log.debug ( f'protocol finished with {self.request.response=}' )
 			self.request = None
 			self.request_protocol = None
 
@@ -909,6 +897,7 @@ class Server ( Connection ):
 		self.reset()
 	
 	def greeting ( self ) -> bytes:
+		# TODO FIXME: figure out how to move this to GreetingRequest._server_protocol()
 		# if too busy, can also return:
 		#	421-{self.hostname} is too busy to accept mail right now.
 		#	421 Please come back in {delay} seconds.
@@ -932,7 +921,7 @@ class Server ( Connection ):
 				yield ResponseEvent ( 500, 'Command not recognized' )
 				return
 			try:
-				request: RequestType = requestcls.__new__ ( requestcls )
+				request: Request = requestcls.__new__ ( requestcls )
 				request_protocol = request._server_protocol ( self, argtext[0] if argtext else '' )
 			except SendDataEvent as event: # this can happen if there's a problem parsing the command
 				yield event
@@ -962,10 +951,9 @@ class Client ( Connection ):
 		yield from self._run_protocol()
 	
 	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Client._receive_line' )
+		log = logger.getChild ( 'Client._receive_line' )
 		
 		if self.need_data:
-			#log.debug ( f'got data for protocol: {line=}' )
 			self.need_data.data = line
 			self.need_data = None
 			yield from self._run_protocol()

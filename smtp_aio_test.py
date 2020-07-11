@@ -87,10 +87,7 @@ class Tests ( unittest.TestCase ):
 				try:
 					class TestServer ( smtp_aio.Server ):
 						async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
-							event.reject() # not implemented yet
-						
-						async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-							raise NotImplementedError
+							event.reject() # not ready yet
 						
 						async def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None:
 							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':

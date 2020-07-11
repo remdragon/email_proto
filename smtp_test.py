@@ -97,7 +97,9 @@ class Tests ( unittest.TestCase ):
 		self.assertEqual ( repr ( evt ), 'smtp_proto.Event()' )
 		
 		evt = smtp_proto.CompleteEvent ( 'from@test.com', [ 'to@test.com' ], b'' )
-		self.assertEqual ( repr ( evt ), 'smtp_proto.CompleteEvent(_acceptance=None, _code=None, _message=None)' )
+		self.assertEqual ( repr ( evt ),
+			"smtp_proto.CompleteEvent(_acceptance=None, _code=450, _message='Unable to accept message for delivery')",
+		)
 		
 		evt = smtp_proto.AuthEvent ( 'Zaphod', 'Beeblebrox' )
 		self.assertEqual ( repr ( evt ), "smtp_proto.AuthEvent(uid='Zaphod')" ) # <-- intentionally not showing pwd

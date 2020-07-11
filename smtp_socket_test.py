@@ -5,7 +5,6 @@ import socket
 import ssl
 import sys
 import threading
-import trustme # pip install trustme
 import unittest
 
 # mail_proto imports:
@@ -52,7 +51,7 @@ class Tests ( unittest.TestCase ):
 				
 				self.assertEqual (
 					repr ( cli.starttls() ),
-					"smtp_proto.SuccessResponse(220, 'Go ahead, make my day')",
+					"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 				)
 				
 				self.assertEqual (

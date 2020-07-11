@@ -69,7 +69,9 @@ class Client ( metaclass = ABCMeta ):
 			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			await self._write ( event.data )
 		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
+			log.debug ( 'calling on_starttls_begin()' )
 			await self.on_starttls_begin ( event )
+			log.debug ( 'back from on_starttls_begin()' )
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -167,8 +169,8 @@ class Server ( metaclass = ABCMeta ):
 			while True:
 				try:
 					data = await self._read()
-				except OSError: # TODO FIXME: more specific exception?
-					raise smtp_proto.Closed()
+				except OSError as e: # TODO FIXME: more specific exception?
+					raise smtp_proto.Closed() from e
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
 					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
@@ -178,7 +180,9 @@ class Server ( metaclass = ABCMeta ):
 					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
 						await self.on_starttls_accept ( event )
 					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
+						log.debug ( 'calling on_starttls_begin()' )
 						await self.on_starttls_begin ( event )
+						log.debug ( 'back from on_starttls_begin()' )
 					elif isinstance ( event, smtp_proto.AuthEvent ):
 						await self.on_authenticate ( event )
 					elif isinstance ( event, smtp_proto.MailFromEvent ):

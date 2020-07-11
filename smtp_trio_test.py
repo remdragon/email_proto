@@ -7,12 +7,17 @@ from typing import Iterator
 import unittest
 
 # mail_proto imports:
+import itrustme
 import smtp_proto
 import smtp_trio
 
 logger = logging.getLogger ( __name__ )
 
 b2s = smtp_proto.b2s
+
+trust = itrustme.ServerOnly (
+	server_hostname = 'milliways.local',
+)
 
 class Tests ( unittest.TestCase ):
 	def test_auth_plain1 ( self ) -> None:
@@ -25,6 +30,7 @@ class Tests ( unittest.TestCase ):
 				log = logger.getChild ( 'main.client_task' )
 				try:
 					cli = smtp_trio.Client()
+					cli.ssl_context = trust.client_context()
 					cli.stream = stream
 					
 					self.assertEqual ( repr ( await cli._connect() ), "smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')" )
@@ -60,10 +66,12 @@ class Tests ( unittest.TestCase ):
 							raise
 					self.assertEqual ( repr ( await cli.rset() ), "smtp_proto.SuccessResponse(250, 'OK')" )
 					
-					if False: # not ready yet
-						self.assertEqual ( repr ( await cli.starttls() ) )
+					self.assertEqual (
+						repr ( await cli.starttls() ),
+						"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
+					)
 					
-					if True: # request an non-existent AUTH mechanism
+					if True: # request a non-existent AUTH mechanism
 						class AuthFubarRequest ( smtp_proto.Request ):
 							def _client_protocol ( self ) -> Iterator[smtp_proto.Event]:
 								log = logger.getChild ( 'AuthFubarRequest._client_protocol' )
@@ -115,13 +123,12 @@ class Tests ( unittest.TestCase ):
 							self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'already authenticated (RFC4954#4 Restrictions)')" )
 							raise
 					
-					if False: # TODO FIXME
-						with self.assertRaises ( smtp_proto.ErrorResponse ):
-							try:
-								await cli.expn ( 'allusers' )
-							except smtp_proto.ErrorResponse as e:
-								self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(550, 'Access Denied!')" )
-								raise
+					with self.assertRaises ( smtp_proto.ErrorResponse ):
+						try:
+							await cli.expn ( 'allusers' )
+						except smtp_proto.ErrorResponse as e:
+							self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(550, 'Access Denied!')" )
+							raise
 					
 					with self.assertRaises ( smtp_proto.ErrorResponse ):
 						try:
@@ -211,10 +218,7 @@ class Tests ( unittest.TestCase ):
 				try:
 					class TestServer ( smtp_trio.Server ):
 						async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
-							event.reject()
-						
-						async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-							raise NotImplementedError
+							event.accept()
 						
 						async def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None:
 							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
@@ -243,6 +247,8 @@ class Tests ( unittest.TestCase ):
 							event.accept() # or .reject()
 					
 					srv = TestServer ( 'milliways.local' )
+					
+					srv.ssl_context = trust.server_context()
 					
 					await srv.run ( stream )
 				except smtp_proto.Closed:

@@ -8,9 +8,9 @@ It also provides reference implementations with i/o.
 
 Download from [here](https://github.com/remdragon/email_proto)?
 
-**NOTE**: The reference trio implementations required that you install trio `pip install trio`, but this isn't a strict dependency, in case you want to use a different i/o backend.
+**NOTE**: The reference trio implementation requires that you install trio `pip install trio`, but this isn't a strict dependency, in case you want to use a different i/o backend.
 
-(Hopefully this can get hosted on pip somebody)
+(Hopefully this can get hosted on pip someday)
 
 ## Usage
 
@@ -21,7 +21,7 @@ import from email_proto.smtp_socket import Client # reference synchronous socket
 client = Client()
 client.connect ( 'smtp.yourdomain.com', 465 )
 client.helo ( 'localhost' )
-client.auth ( 'zaphod@beeblebrox.com', getpass.getpass('Password:') )
+client.auth ( 'zaphod@beeblebrox.com', getpass.getpass ( 'Password:' ) )
 client.mail_from ( 'zaphod@beeblebrox.com' )
 client.rcpt_to ( 'ford@prefect.com' )
 client.data ( b'(email content here)' )

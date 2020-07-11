@@ -72,7 +72,10 @@ class Client ( metaclass = ABCMeta ):
 			except Exception as e:
 				event.exception = e
 		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-			self.on_starttls_begin ( event )
+			try:
+				self.on_starttls_begin ( event )
+			except Exception as e:
+				event.exception = e
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -175,13 +178,19 @@ class Server ( metaclass = ABCMeta ):
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
 					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
-						_send ( event.data )
+						try:
+							_send ( event.data )
+						except Exception as e:
+							event.exception = e
 					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
 						self.on_rcpt_to ( event )
 					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
 						self.on_starttls_accept ( event )
 					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-						self.on_starttls_begin ( event )
+						try:
+							self.on_starttls_begin ( event )
+						except Exception as e:
+							event.exception = e
 					elif isinstance ( event, smtp_proto.AuthEvent ):
 						self.on_authenticate ( event )
 					elif isinstance ( event, smtp_proto.MailFromEvent ):

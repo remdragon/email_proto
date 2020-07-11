@@ -46,22 +46,13 @@ class Client ( Transport, smtp_sync.Client ):
 		raise ConnectionError ( f'Unable to connect to {hostname=} {port=}' )
 	
 	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-		log = logger.getChild ( 'Client.on_starttls_begin' )
-		try:
-			log.debug ( f'{self.server_hostname=}' )
-			log.debug ( f'pre-{self.ssl_context=}' )
-			if self.ssl_context is None:
-				self.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
-			log.debug ( f'aft-{self.ssl_context=}' )
-			log.debug ( f'pre-{self.sock=}' )
-			self.sock = self.ssl_context.wrap_socket (
-				self.sock,
-				server_hostname = self.server_hostname,
-			)
-			log.debug ( f'aft-{self.sock=}' )
-		except Exception:
-			log.exception ( 'Error starting tls:' )
-			raise smtp_proto.ResponseEvent ( 421, 'Error starting tls' )
+		#log = logger.getChild ( 'Client.on_starttls_begin' )
+		if self.ssl_context is None:
+			self.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
+		self.sock = self.ssl_context.wrap_socket (
+			self.sock,
+			server_hostname = self.server_hostname,
+		)
 
 
 
@@ -73,14 +64,10 @@ class Server ( Transport, smtp_sync.Server ):
 		self._run()
 	
 	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-		try:
-			if self.ssl_context is None:
-				self.ssl_context = ssl.create_default_context()
-			self.sock = self.ssl_context.wrap_socket (
-				self.sock,
-				server_side = True,
-				#server_hostname = self.
-			)
-		except Exception as e:
-			event.exception = e
-			#raise smtp_proto.ResponseEvent ( 421, 'Error starting tls' ) from e
+		if self.ssl_context is None:
+			self.ssl_context = ssl.create_default_context()
+			self.ssl_context.verify_mode = ssl.CERT_NONE
+		self.sock = self.ssl_context.wrap_socket (
+			self.sock,
+			server_side = True,
+		)
