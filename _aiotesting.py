@@ -77,7 +77,7 @@ class PipeStreamReader:
 				self._event = await self.q.get()
 				continue
 			count += len ( data )
-			datas.append ( data )
+			datas.append ( bytes ( data ) )
 		eol += len ( separator )
 		data = b''.join ( datas )
 		data, extra = data[:eol], data[eol:]

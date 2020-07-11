@@ -24,7 +24,8 @@ class Transport:
 		return await self.stream.receive_some()
 	
 	async def _write ( self, data: bytes ) -> None:
-		#log = logger.getChild ( 'Transport._write' )
+		log = logger.getChild ( 'Transport._write' )
+		#log.debug ( f'{data=}' )
 		await self.stream.send_all ( data )
 	
 	async def _close ( self ) -> None:

@@ -19,11 +19,13 @@ ENCODING = 'us-ascii'
 ERRORS = 'strict'
 
 _r_eol = re.compile ( r'[\r\n]' )
-_r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?([^>]*)>?\s*$', re.I )
-_r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?([^>]*)>?\s*$', re.I )
+_r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
+_r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
 _r_crlf_dot = re.compile ( b'\\r\\n\\.', re.M )
 
 def b2s ( b: bytes ) -> str:
+	if isinstance ( b, memoryview ):
+		b = bytes ( b )
 	return b.decode ( ENCODING, ERRORS )
 
 def s2b ( s: str ) -> bytes:
@@ -712,7 +714,7 @@ class RcptToRequest ( Request ):
 
 @request_verb ( 'DATA' )
 class DataRequest ( Request ):
-	initial_response: Opt[Response] = None
+	# see RFC 5321 4.5.2 for byte stuffing algorithm description
 	
 	def __init__ ( self, payload: bytes ) -> None:
 		assert isinstance ( payload, bytes_types ) and len ( payload ) > 0
@@ -721,20 +723,24 @@ class DataRequest ( Request ):
 	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
 		log = logger.getChild ( 'DataRequest._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'DATA\r\n' )
-		payload = self.payload
+		payload = memoryview ( self.payload ) # avoid data copying when we start slicing it later
 		last = 0
 		stitch = b'\r\n..'
+		parts: List[bytes] = []
 		for m in _r_crlf_dot.finditer ( payload ):
 			start = m.start()
-			chunk = payload[last:start] # TODO FIXME: performance concern: does this copy or is it a view?
+			chunk = payload[last:start]
 			#log.debug ( f'{last=} {start=} {chunk=} {stitch=}' )
-			yield SendDataEvent ( chunk, stitch )
+			parts.append ( chunk )
+			parts.append ( stitch )
 			last = start + 3
-		tail = payload[last:]
-		if tail:
-			#log.debug ( f'{last=} {tail=}' )
-			yield SendDataEvent ( tail )
-		yield from _client_proto_send_recv_done ( '\r\n.\r\n' )
+		if last < len ( payload ):
+			parts.append ( payload[last:] )
+		if not self.payload.endswith ( b'\r\n' ):
+			parts.append ( b'\r\n' )
+		log.debug ( f'{parts=}' )
+		yield from SendDataEvent ( *parts ).go()
+		yield from _client_proto_send_recv_done ( '.\r\n' )
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
 		if not server.client_hostname and server.pedantic:
@@ -941,6 +947,7 @@ class Server ( Connection ):
 			yield from self._run_protocol()
 		elif self.request is None:
 			verb, *argtext = map ( str.rstrip, b2s ( line ).split ( ' ', 1 ) ) # ex: verb='DATA', argtext=[] or verb='AUTH', argtext=['PLAIN XXXXXXXXXXXXX']
+			verb = verb.upper() # RFC5321#2.4 command verbs are not case-sensitive
 			requestcls = _request_verbs.get ( verb )
 			if requestcls is None:
 				yield ResponseEvent ( 500, 'Command not recognized' )
