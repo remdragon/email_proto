@@ -34,19 +34,24 @@ class Client ( Transport, smtp_async.Client ):
 	server_hostname: Opt[str] = None
 	ssl_context: Opt[ssl.SSLContext] = None
 	
-	async def connect ( self, hostname: str, port: int ) -> None:
+	async def connect ( self, hostname: str, port: int, tls: bool ) -> None:
 		self.server_hostname = hostname
 		try:
 			self.stream = await trio.open_tcp_stream ( hostname, port,
 				happy_eyeballs_delay = happy_eyeballs_delay,
 			)
+			if tls:
+				self._wrap_ssl()
 		except Exception as e:
 			log.warning ( f'Error connecting to {address=}: {e!r}' )
 		else:
-			await self._connect()
+			await self._connect ( tls )
 	
 	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
 		#log = logger.getChild ( 'Client.on_starttls_begin' )
+		self._wrap_ssl()
+	
+	def _wrap_ssl ( self ) -> None:
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
 		self.stream = trio.SSLStream (
@@ -59,9 +64,9 @@ class Client ( Transport, smtp_async.Client ):
 class Server ( Transport, smtp_async.Server ):
 	ssl_context: Opt[ssl.SSLContext] = None
 	
-	async def run ( self, stream: trio.abc.Stream ) -> None:
+	async def run ( self, stream: trio.abc.Stream, tls: bool ) -> None:
 		self.stream = stream
-		await self._run()
+		await self._run ( tls )
 	
 	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
 		#log = logger.getChild ( 'Server.on_starttls_begin' )

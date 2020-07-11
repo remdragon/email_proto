@@ -33,7 +33,7 @@ class Tests ( unittest.TestCase ):
 					cli.ssl_context = trust.client_context()
 					cli.stream = stream
 					
-					self.assertEqual ( repr ( await cli._connect() ), "smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')" )
+					self.assertEqual ( repr ( await cli._connect ( False ) ), "smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')" )
 					
 					# NOTE we can't (currently) test a successful HELO and EHLO in a single session, so I'll test HELO in a different unittest
 					r = await cli.ehlo ( 'localhost' )
@@ -41,13 +41,13 @@ class Tests ( unittest.TestCase ):
 					self.assertEqual ( r.code, 250 )
 					self.assertEqual ( sorted ( r.lines ), [
 						'8BITMIME',
-						'AUTH PLAIN LOGIN',
+						#'AUTH PLAIN LOGIN', # not available because we're not encrypted yet
 						'PIPELINING',
 						'STARTTLS',
 						'milliways.local greets localhost',
 					] )
 					self.assertTrue ( r.esmtp_8bitmime )
-					self.assertEqual ( sorted ( r.esmtp_auth ), [ 'LOGIN', 'PLAIN' ] )
+					#self.assertEqual ( sorted ( r.esmtp_auth ), [ 'LOGIN', 'PLAIN' ] )
 					self.assertTrue ( r.esmtp_pipelining )
 					self.assertTrue ( r.esmtp_starttls )
 					
@@ -73,7 +73,7 @@ class Tests ( unittest.TestCase ):
 					
 					if True: # request a non-existent AUTH mechanism
 						class AuthFubarRequest ( smtp_proto.Request ):
-							def _client_protocol ( self ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
 								log = logger.getChild ( 'AuthFubarRequest._client_protocol' )
 								yield from smtp_proto._client_proto_send_recv_done ( f'AUTH FUBAR\r\n' )
 							def _server_protocol ( self, server: smtp_proto.Server ) -> Iterator[smtp_proto.Event]:
@@ -87,7 +87,7 @@ class Tests ( unittest.TestCase ):
 					
 					if True: # construct an invalid AUTH PLAIN request to trigger specific error handling in the server-side protocol
 						class BadAuthPlain1Request ( smtp_proto.AuthPlain1Request ):
-							def _client_protocol ( self ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
 								log = logger.getChild ( 'HeloRequest._client_protocol' )
 								yield from smtp_proto._client_proto_send_recv_done ( f'AUTH PLAIN BAADF00D\r\n' )
 						with self.assertRaises ( smtp_proto.ErrorResponse ):
@@ -139,7 +139,7 @@ class Tests ( unittest.TestCase ):
 					
 					with self.assertRaises ( smtp_proto.ErrorResponse ):
 						class MailFrumRequest ( smtp_proto.MailFromRequest ):
-							def _client_protocol ( self ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
 								yield from smtp_proto._client_proto_send_recv_done ( f'MAIL FRUM:<{self.mail_from}>\r\n' )
 						try:
 							await cli._send_recv ( MailFrumRequest ( 'foo@bar.com' ) )
@@ -165,7 +165,7 @@ class Tests ( unittest.TestCase ):
 					
 					with self.assertRaises ( smtp_proto.ErrorResponse ):
 						class RcptTooRequest ( smtp_proto.RcptToRequest ):
-							def _client_protocol ( self ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
 								yield from smtp_proto._client_proto_send_recv_done ( f'RCPT TOO:<{self.rcpt_to}>\r\n' )
 						try:
 							await cli._send_recv ( RcptTooRequest ( 'foo@bar.com' ) )
@@ -204,7 +204,7 @@ class Tests ( unittest.TestCase ):
 					
 					self.assertEqual ( repr ( await cli.noop() ), "smtp_proto.SuccessResponse(250, 'OK')" )
 					
-					self.assertEqual ( repr ( await cli.quit() ), "smtp_proto.SuccessResponse(250, 'OK')" )
+					self.assertEqual ( repr ( await cli.quit() ), "smtp_proto.SuccessResponse(221, 'Closing connection')" )
 				
 				except smtp_proto.ErrorResponse as e: # pragma: no cover
 					log.exception ( f'server error: {e=}' )
@@ -250,7 +250,7 @@ class Tests ( unittest.TestCase ):
 					
 					srv.ssl_context = trust.server_context()
 					
-					await srv.run ( stream )
+					await srv.run ( stream, False )
 				except smtp_proto.Closed:
 					pass
 				finally:

@@ -34,7 +34,7 @@ class Tests ( unittest.TestCase ):
 			class BrokenConnection ( smtp_proto.Connection ):
 				def _receive_line ( self, line: bytes ) -> Iterator[smtp_proto.Event]:
 					yield from super()._receive_line ( line )
-			broken = BrokenConnection()
+			broken = BrokenConnection ( False )
 			with self.assertRaises ( NotImplementedError ):
 				list ( broken._receive_line ( b'fubar' ) )
 		
@@ -43,7 +43,7 @@ class Tests ( unittest.TestCase ):
 				if line:
 					yield smtp_proto.SendDataEvent ( line )
 		
-		conn = TestConnection()
+		conn = TestConnection ( False )
 		evts = list ( conn.receive ( b'foo\r' ) )
 		self.assertEqual ( evts, [] )
 		evts = [ evt.data for evt in conn.receive ( b'\nba' ) ]
@@ -61,7 +61,7 @@ class Tests ( unittest.TestCase ):
 		with self.assertRaises ( smtp_proto.Closed ):
 			evts = list ( conn.receive ( b'' ) )
 		
-		conn = TestConnection()
+		conn = TestConnection ( False )
 		with self.assertRaises ( smtp_proto.ProtocolError ):
 			evts = list ( conn.receive ( b'X' * smtp_proto._MAXLINE ) )
 		

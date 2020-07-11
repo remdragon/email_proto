@@ -39,9 +39,11 @@ class Transport:
 
 class Client ( Transport, smtp_async.Client ):
 	
-	async def connect ( self, hostname: str, port: int ) -> None:
-		self.rx, self.tx = await asyncio.open_connection ( hostname, port )
-		await self._connect()
+	async def connect ( self, hostname: str, port: int, tls: bool ) -> None:
+		self.rx, self.tx = await asyncio.open_connection (
+			hostname, port, ssl = tls,
+		)
+		await self._connect ( tls )
 
 
 class Server ( Transport, smtp_async.Server ):
@@ -49,7 +51,8 @@ class Server ( Transport, smtp_async.Server ):
 	async def run ( self,
 		rx: asyncio.StreamReader,
 		tx: asyncio.StreamWriter,
+		tls: bool,
 	) -> None:
 		self.rx = rx
 		self.tx = tx
-		await self._run()
+		await self._run ( tls )

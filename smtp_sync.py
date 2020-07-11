@@ -12,8 +12,8 @@ b2s = smtp_proto.b2s
 class Client ( metaclass = ABCMeta ):
 	cli: smtp_proto.Client
 	
-	def _connect ( self ) -> smtp_proto.SuccessResponse:
-		self.cli = smtp_proto.Client()
+	def _connect ( self, tls: bool ) -> smtp_proto.SuccessResponse:
+		self.cli = smtp_proto.Client ( tls )
 		return self.greeting()
 	
 	def greeting ( self ) -> smtp_proto.SuccessResponse:
@@ -158,10 +158,10 @@ class Server ( metaclass = ABCMeta ):
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_rcpt_to()' )
 	
-	def _run ( self ) -> None:
+	def _run ( self, tls: bool ) -> None:
 		log = logger.getChild ( 'Server._run' )
 		try:
-			srv = smtp_proto.Server ( self.hostname )
+			srv = smtp_proto.Server ( self.hostname, tls )
 			srv.esmtp_8bitmime = self.esmtp_8bitmime
 			srv.esmtp_pipelining = self.esmtp_pipelining
 			

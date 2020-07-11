@@ -31,7 +31,7 @@ class Tests ( unittest.TestCase ):
 					cli.rx, cli.tx = rx, tx
 					
 					self.assertEqual (
-						repr ( await cli._connect() ),
+						repr ( await cli._connect ( True ) ),
 						"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 					)
 					
@@ -39,8 +39,8 @@ class Tests ( unittest.TestCase ):
 					self.assertEqual ( type ( r ), smtp_proto.EhloResponse )
 					self.assertEqual ( r.code, 250 )
 					self.assertEqual ( sorted ( r.lines ), [
-						'AUTH PLAIN LOGIN',
-						'STARTTLS',
+						'AUTH PLAIN LOGIN', # TODO FIXME WARNING: we are *pretending* to be in ssl in this test
+						#'STARTTLS', # not available because smtp_proto thinks we're already encrypted
 						'milliways.local greets localhost',
 					] )
 					
@@ -72,7 +72,7 @@ class Tests ( unittest.TestCase ):
 					
 					self.assertEqual (
 						repr ( await cli.quit() ),
-						"smtp_proto.SuccessResponse(250, 'OK')",
+						"smtp_proto.SuccessResponse(221, 'Closing connection')",
 					)
 				
 				except smtp_proto.ErrorResponse as e: # pragma: no cover
@@ -113,7 +113,7 @@ class Tests ( unittest.TestCase ):
 					srv.esmtp_pipelining = False # code coverage reasons
 					srv.esmtp_8bitmime = False # code coverage reasons
 					
-					await srv.run ( rx, tx )
+					await srv.run ( rx, tx, True )
 				except smtp_proto.Closed:
 					pass
 				finally:

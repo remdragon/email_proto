@@ -27,7 +27,7 @@ else:
 	)
 
 class Tests ( unittest.TestCase ):
-	def test_auth_plain1 ( self ) -> None:
+	def test_ping_pong ( self ) -> None:
 		thing1, thing2 = socket.socketpair()
 		
 		def client_task ( sock: socket.socket ) -> None:
@@ -40,7 +40,7 @@ class Tests ( unittest.TestCase ):
 				cli.sock = sock
 				
 				self.assertEqual (
-					repr ( cli._connect() ),
+					repr ( cli._connect ( False ) ),
 					"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 				)
 				
@@ -92,7 +92,7 @@ class Tests ( unittest.TestCase ):
 				
 				self.assertEqual (
 					repr ( cli.quit() ),
-					"smtp_proto.SuccessResponse(250, 'OK')",
+					"smtp_proto.SuccessResponse(221, 'Closing connection')",
 				)
 			
 			except smtp_proto.Closed as e: # pragma: no cover
@@ -147,11 +147,115 @@ class Tests ( unittest.TestCase ):
 				
 				srv.ssl_context = trust.server_context()
 				
-				srv.run ( sock )
+				srv.run ( sock, False )
 			except smtp_proto.Closed:
 				pass
 			except Exception:
 				log.exception ( 'Unexpected server_task exception:' )
+			finally:
+				sock.close()
+		
+		thread1 = threading.Thread ( target = partial ( client_task, thing1 ), name = 'SocketClientThread' )
+		thread2 = threading.Thread ( target = partial ( server_task, thing2 ), name = 'SocketServerThread' )
+		
+		thread1.start()
+		thread2.start()
+		
+		thread1.join()
+		thread2.join()
+	
+	def test_RFC5321_D1_replay ( self ):
+		# can our protocol recreate RFC 5321 D1?
+		
+		thing1, thing2 = socket.socketpair()
+		
+		def client_task ( sock: socket.socket ) -> None:
+			log = logger.getChild ( 'test_auth_plain1.client_task' )
+			try:
+				cli = smtp_socket.Client()
+				
+				cli.server_hostname = 'milliways.local'
+				cli.ssl_context = trust.client_context()
+				cli.sock = sock
+				
+				self.assertEqual (
+					repr ( cli._connect ( False ) ),
+					"smtp_proto.SuccessResponse(220, 'foo.com Simple Mail Transfer Service Ready')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.ehlo ( 'bar.com' ) ),
+					"smtp_proto.EhloResponse(250, 'foo.com greets bar.com', '8BITMIME', 'SIZE', 'DSN', 'HELP')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.mail_from ( 'Smith@bar.com' ) ),
+					"smtp_proto.SuccessResponse(250, 'OK')",
+				)
+				
+				self.assertEqual (
+					repr ( cli.rcpt_to ( 'Jones@foo.com' ) ),
+					"smtp_proto.SuccessResponse(250, 'OK')",
+				)
+				
+				with self.assertRaises ( smtp_proto.ErrorResponse ):
+					try:
+						cli.rcpt_to ( 'Green@foo.com' )
+					except smtp_proto.ErrorResponse as e:
+						self.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(550, 'No such user here')" )
+						raise
+				
+				self.assertEqual (
+					repr ( cli.rcpt_to ( 'Brown@foo.com' ) ),
+					"smtp_proto.SuccessResponse(250, 'OK')",
+				)
+				
+				self.assertEqual ( repr ( cli.data (
+					b'Blah blah blah...\r\n'
+					b'..etc. etc. etc.'
+				) ), "smtp_proto.SuccessResponse(250, 'OK')" )
+				
+				self.assertEqual (
+					repr ( cli.quit() ),
+					"smtp_proto.SuccessResponse(221, 'foo.com Service closing transmission channel')",
+				)
+			
+			except smtp_proto.Closed as e: # pragma: no cover
+				log.debug ( f'server closed connection: {e=}' )
+			except Exception:
+				log.exception ( 'Unexpected client_task exception:' )
+			finally:
+				sock.close()
+		
+		def server_task ( sock: socket.socket ) -> None:
+			log = logger.getChild ( 'test_auth_plain1.server_task' )
+			def expect ( request: bytes, response: bytes ) -> None:
+				received = b''
+				while len ( received ) < len ( request ):
+					received += sock.recv ( len ( request ) - len ( received ) )
+				self.assertEqual ( received, request )
+				sock.sendall ( response )
+			try:
+				expect ( b'', b'220 foo.com Simple Mail Transfer Service Ready\r\n' )
+				expect ( b'EHLO bar.com\r\n',
+					b'250-foo.com greets bar.com\r\n'
+					b'250-8BITMIME\r\n'
+					b'250-SIZE\r\n'
+					b'250-DSN\r\n'
+					b'250 HELP\r\n'
+				)
+				expect ( b'MAIL FROM:<Smith@bar.com>\r\n', b'250 OK\r\n' )
+				expect ( b'RCPT TO:<Jones@foo.com>\r\n', b'250 OK\r\n' )
+				expect ( b'RCPT TO:<Green@foo.com>\r\n', b'550 No such user here\r\n' )
+				expect ( b'RCPT TO:<Brown@foo.com>\r\n', b'250 OK\r\n' )
+				expect ( b'DATA\r\n', b'354 Start mail input; end with <CRLF>.<CRLF>\r\n' )
+				expect (
+					b'Blah blah blah...\r\n'
+					b'...etc. etc. etc.\r\n'
+					b'.\r\n',
+					b'250 OK\r\n'
+				)
+				expect ( b'QUIT\r\n', b'221 foo.com Service closing transmission channel\r\n' )
 			finally:
 				sock.close()
 		
