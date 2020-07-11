@@ -164,7 +164,7 @@ class Tests ( unittest.TestCase ):
 		thread1.join()
 		thread2.join()
 	
-	def test_RFC5321_D1_replay ( self ):
+	def test_RFC5321_D1_replay ( self ) -> None:
 		# can our protocol recreate RFC 5321 D1?
 		
 		thing1, thing2 = socket.socketpair()

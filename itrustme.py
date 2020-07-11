@@ -1,4 +1,4 @@
-import trustme # pip install trustme
+import trustme # type: ignore # pip install trustme
 import ssl
 
 class ServerOnly:

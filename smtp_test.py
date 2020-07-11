@@ -27,7 +27,7 @@ class Tests ( unittest.TestCase ):
 		self.assertEqual ( smtp_proto.b64_decode ( 'SGVsbG8=' ), 'Hello' )
 		
 		evt = smtp_proto.SendDataEvent ( b'foo' )
-		self.assertEqual ( repr ( evt ), "smtp_proto.SendDataEvent(data=b'foo')" )
+		self.assertEqual ( repr ( evt ), "smtp_proto.SendDataEvent(chunks=(b'foo',))" )
 		
 		# test edge cases in Connection buffer management
 		if True:
@@ -46,15 +46,15 @@ class Tests ( unittest.TestCase ):
 		conn = TestConnection ( False )
 		evts = list ( conn.receive ( b'foo\r' ) )
 		self.assertEqual ( evts, [] )
-		evts = [ evt.data for evt in conn.receive ( b'\nba' ) ]
+		evts = [ b''.join ( evt.chunks ) for evt in conn.receive ( b'\nba' ) ]
 		self.assertEqual ( evts, [
 			b'foo\r\n',
 		] )
-		evts = [ evt.data for evt in conn.receive ( b'ar\r\nbaz' ) ]
+		evts = [ b''.join ( evt.chunks ) for evt in conn.receive ( b'ar\r\nbaz' ) ]
 		self.assertEqual ( evts, [
 			b'baar\r\n',
 		] )
-		evts = [ evt.data for evt in conn.receive ( b'' ) ]
+		evts = [ b''.join ( evt.chunks ) for evt in conn.receive ( b'' ) ]
 		self.assertEqual ( evts, [
 			b'baz',
 		] )

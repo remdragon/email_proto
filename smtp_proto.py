@@ -59,24 +59,21 @@ class ThrowableEvent ( Event ):
 
 class SendDataEvent ( ThrowableEvent ):
 	
-	def __init__ ( self, data: bytes ) -> None:
-		assert isinstance ( data, bytes_types ) and len ( data ) > 0
-		self.data = data
+	def __init__ ( self, *chunks: bytes ) -> None:
+		self.chunks: Seq[bytes] = chunks
 	
 	def __repr__ ( self ) -> str:
 		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}(data={self.data!r})'
+		return f'{cls.__module__}.{cls.__name__}(chunks={self.chunks!r})'
 
 class ResponseEvent ( SendDataEvent ):
 	def __init__ ( self, code: int, *lines: str ) -> None:
-		assert isinstance ( code, int ), f'invalid {code=}'
-		assert lines and all ( isinstance ( line, str ) for line in lines ), f'invalid {lines=}'
 		seps = [ '-' ] * len ( lines )
 		seps[-1] = ' '
-		self.data = s2b ( ''.join (
+		self.chunks = ( s2b ( ''.join (
 			f'{code}{sep}{line}\r\n'
 			for sep, line in zip ( seps, lines )
-		) )
+		) ), )
 
 class AcceptRejectEvent ( Event ):
 	success_code: int
@@ -165,6 +162,7 @@ class ExpnVrfyEvent ( AcceptRejectEvent ):
 	success_message = '' # not used
 	error_code = 550
 	error_message = 'Access Denied!'
+	mailboxes: Seq[str]
 	
 	def __init__ ( self, mailbox: str ) -> None:
 		self.mailbox = mailbox
@@ -172,8 +170,8 @@ class ExpnVrfyEvent ( AcceptRejectEvent ):
 	def accept ( self, *mailboxes: str ) -> None:
 		self._code = self.success_code
 		self._acceptance = True
-		assert mailboxes and all ( isinstance ( mailbox, str ) for mailbox in mailboxes ), f'invalid {mailboxes=}'
-		self.mailboxes = mailboxes
+		#assert mailboxes and all ( isinstance ( mailbox, str ) for mailbox in mailboxes ), f'invalid {mailboxes=}'
+		self.mailboxes: Seq[str] = mailboxes
 
 class ExpnEvent ( ExpnVrfyEvent ):
 	pass
@@ -189,7 +187,7 @@ class MailFromEvent ( AcceptRejectEvent ):
 	error_message = 'address rejected'
 	
 	def __init__ ( self, mail_from: str ) -> None:
-		assert isinstance ( mail_from, str ) and len ( mail_from.strip() ) > 0, f'invalid {mail_from=}'
+		#assert isinstance ( mail_from, str ) and len ( mail_from.strip() ) > 0, f'invalid {mail_from=}'
 		super().__init__()
 		self.mail_from = mail_from
 	
@@ -207,6 +205,7 @@ class RcptToEvent ( AcceptRejectEvent ):
 	error_message = 'address rejected'
 	
 	def __init__ ( self, rcpt_to: str ) -> None:
+		#assert isinstance ( rcpt_to, str ) and len ( rcpt_to.strip() ) > 0, f'invalid {rcpt_to=}'
 		super().__init__()
 		self.rcpt_to = rcpt_to
 	
@@ -729,8 +728,7 @@ class DataRequest ( Request ):
 			start = m.start()
 			chunk = payload[last:start] # TODO FIXME: performance concern: does this copy or is it a view?
 			#log.debug ( f'{last=} {start=} {chunk=} {stitch=}' )
-			yield SendDataEvent ( chunk )
-			yield SendDataEvent ( stitch )
+			yield SendDataEvent ( chunk, stitch )
 			last = start + 3
 		tail = payload[last:]
 		if tail:

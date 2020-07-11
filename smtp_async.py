@@ -40,10 +40,14 @@ class Client ( metaclass = ABCMeta ):
 		return await self._send_recv ( smtp_proto.AuthLoginRequest ( uid, pwd ) )
 	
 	async def expn ( self, mailbox: str ) -> smtp_proto.ExpnResponse:
-		return await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+		r = await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+		assert isinstance ( r, smtp_proto.ExpnResponse )
+		return r
 	
-	async def vrfy ( self, mailbox: str ) -> smtp_proto.SuccessResponse:
-		return await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+	async def vrfy ( self, mailbox: str ) -> smtp_proto.VrfyResponse:
+		r = await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+		assert isinstance ( r, smtp_proto.VrfyResponse )
+		return r
 	
 	async def mail_from ( self, email: str ) -> smtp_proto.SuccessResponse:
 		return await self._send_recv ( smtp_proto.MailFromRequest ( email ) )
@@ -66,8 +70,12 @@ class Client ( metaclass = ABCMeta ):
 	async def _event ( self, event: smtp_proto.Event ) -> None:
 		log = logger.getChild ( 'Client._event' )
 		if isinstance ( event, smtp_proto.SendDataEvent ):
-			log.debug ( f'C>{b2s(event.data).rstrip()}' )
-			await self._write ( event.data )
+			try:
+				for chunk in event.chunks:
+					log.debug ( f'C>{b2s(chunk).rstrip()}' ) # TODO FIXME: SendDataEvent.chunks isn't line-based so this log.debug doesn't make sense
+					await self._write ( chunk )
+			except Exception as e:
+				event.exception = e
 		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
 			log.debug ( 'calling on_starttls_begin()' )
 			await self.on_starttls_begin ( event )
@@ -82,6 +90,7 @@ class Client ( metaclass = ABCMeta ):
 			log.debug ( f'S>{b2s(data).rstrip()}' )
 			for event in self.cli.receive ( data ):
 				await self._event ( event )
+		assert isinstance ( request.response, smtp_proto.SuccessResponse )
 		return request.response
 	
 	async def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
@@ -161,9 +170,10 @@ class Server ( metaclass = ABCMeta ):
 			srv.esmtp_8bitmime = self.esmtp_8bitmime
 			srv.esmtp_pipelining = self.esmtp_pipelining
 			
-			async def _send ( data: bytes ) -> None:
-				log.debug ( f'S>{b2s(data).rstrip()}' )
-				await self._write ( data )
+			async def _send ( *chunks: bytes ) -> None:
+				for chunk in chunks:
+					log.debug ( f'S>{b2s(chunk).rstrip()}' )
+					await self._write ( chunk )
 			
 			await _send ( srv.greeting() )
 			while True:
@@ -174,7 +184,10 @@ class Server ( metaclass = ABCMeta ):
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
 					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
-						await _send ( event.data )
+						try:
+							await _send ( *event.chunks )
+						except Exception as e:
+							event.exception = e
 					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
 						await self.on_rcpt_to ( event )
 					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):

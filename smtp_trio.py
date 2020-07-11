@@ -5,6 +5,7 @@ from abc import ABCMeta, abstractmethod
 import logging
 import ssl
 import trio # pip install trio trio-typing
+from typing import Optional as Opt
 
 # mail_proto imports:
 import smtp_proto
@@ -35,17 +36,14 @@ class Client ( Transport, smtp_async.Client ):
 	ssl_context: Opt[ssl.SSLContext] = None
 	
 	async def connect ( self, hostname: str, port: int, tls: bool ) -> None:
+		log = logger.getChild ( 'Client.connect' )
 		self.server_hostname = hostname
-		try:
-			self.stream = await trio.open_tcp_stream ( hostname, port,
-				happy_eyeballs_delay = happy_eyeballs_delay,
-			)
-			if tls:
-				self._wrap_ssl()
-		except Exception as e:
-			log.warning ( f'Error connecting to {address=}: {e!r}' )
-		else:
-			await self._connect ( tls )
+		self.stream = await trio.open_tcp_stream ( hostname, port,
+			happy_eyeballs_delay = happy_eyeballs_delay,
+		)
+		if tls:
+			self._wrap_ssl()
+		await self._connect ( tls )
 	
 	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
 		#log = logger.getChild ( 'Client.on_starttls_begin' )

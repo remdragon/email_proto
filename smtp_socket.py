@@ -5,6 +5,7 @@ from abc import ABCMeta, abstractmethod
 import logging
 import socket
 import ssl
+from typing import Optional as Opt
 
 # mail_proto imports:
 import smtp_proto

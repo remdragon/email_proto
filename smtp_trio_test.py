@@ -76,7 +76,7 @@ class Tests ( unittest.TestCase ):
 							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
 								log = logger.getChild ( 'AuthFubarRequest._client_protocol' )
 								yield from smtp_proto._client_proto_send_recv_done ( f'AUTH FUBAR\r\n' )
-							def _server_protocol ( self, server: smtp_proto.Server ) -> Iterator[smtp_proto.Event]:
+							def _server_protocol ( self, server: smtp_proto.Server, moreargtext: str ) -> Iterator[smtp_proto.Event]:
 								assert False
 						with self.assertRaises ( smtp_proto.ErrorResponse ):
 							try:

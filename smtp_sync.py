@@ -40,10 +40,14 @@ class Client ( metaclass = ABCMeta ):
 		return self._send_recv ( smtp_proto.AuthLoginRequest ( uid, pwd ) )
 	
 	def expn ( self, mailbox: str ) -> smtp_proto.ExpnResponse:
-		return self._send_recv ( smtp_proto.ExpnRequest ( mailbox ) )
+		r = self._send_recv ( smtp_proto.ExpnRequest ( mailbox ) )
+		assert isinstance ( r, smtp_proto.ExpnResponse )
+		return r
 	
 	def vrfy ( self, mailbox: str ) -> smtp_proto.VrfyResponse:
-		return self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+		r = self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+		assert isinstance ( r, smtp_proto.VrfyResponse )
+		return r
 	
 	def mail_from ( self, email: str ) -> smtp_proto.SuccessResponse:
 		return self._send_recv ( smtp_proto.MailFromRequest ( email ) )
@@ -66,9 +70,10 @@ class Client ( metaclass = ABCMeta ):
 	def _event ( self, event: smtp_proto.Event ) -> None:
 		log = logger.getChild ( 'Client._event' )
 		if isinstance ( event, smtp_proto.SendDataEvent ):
-			log.debug ( f'C>{b2s(event.data).rstrip()}' )
 			try:
-				self._write ( event.data )
+				for chunk in event.chunks:
+					log.debug ( f'C>{b2s(chunk).rstrip()}' ) # TODO FIXME: SendDataEvent.chunks isn't line-based so this log.debug doesn't make sense
+					self._write ( chunk )
 			except Exception as e:
 				event.exception = e
 		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
@@ -86,6 +91,7 @@ class Client ( metaclass = ABCMeta ):
 			log.debug ( f'S>{b2s(data).rstrip()}' )
 			for event in self.cli.receive ( data ):
 				self._event ( event )
+		assert isinstance ( request.response, smtp_proto.SuccessResponse )
 		return request.response
 	
 	def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
@@ -165,9 +171,10 @@ class Server ( metaclass = ABCMeta ):
 			srv.esmtp_8bitmime = self.esmtp_8bitmime
 			srv.esmtp_pipelining = self.esmtp_pipelining
 			
-			def _send ( data: bytes ) -> None:
-				log.debug ( f'S>{b2s(data).rstrip()}' )
-				self._write ( data )
+			def _send ( *chunks: bytes ) -> None:
+				for chunk in chunks:
+					log.debug ( f'S>{b2s(chunk).rstrip()}' )
+					self._write ( chunk )
 			
 			_send ( srv.greeting() )
 			while True:
@@ -179,7 +186,7 @@ class Server ( metaclass = ABCMeta ):
 				for event in srv.receive ( data ):
 					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
 						try:
-							_send ( event.data )
+							_send ( *event.chunks )
 						except Exception as e:
 							event.exception = e
 					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
