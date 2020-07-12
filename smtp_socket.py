@@ -49,8 +49,8 @@ class Client ( Transport, smtp_sync.Client ):
 				return
 		raise ConnectionError ( f'Unable to connect to {hostname=} {port=}' )
 	
-	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-		#log = logger.getChild ( 'Client.on_starttls_begin' )
+	def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+		#log = logger.getChild ( 'Client.on_StartTlsBeginEvent' )
 		self._wrap_ssl()
 	
 	def _wrap_ssl ( self ) -> None:
@@ -70,7 +70,7 @@ class Server ( Transport, smtp_sync.Server ):
 		self.sock = sock
 		self._run ( tls )
 	
-	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+	def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context()
 			self.ssl_context.verify_mode = ssl.CERT_NONE

@@ -23,8 +23,8 @@ class Tests ( unittest.TestCase ):
 			async def client_task ( sock: socket.socket ) -> None:
 				log = logger.getChild ( 'main.client_task' )
 				rx, tx = await asyncio.open_connection ( sock = sock )
+				cli = smtp_aio.Client()
 				try:
-					cli = smtp_aio.Client()
 					cli.rx, cli.tx = rx, tx
 					
 					test.assertEqual (
@@ -90,42 +90,42 @@ class Tests ( unittest.TestCase ):
 			async def server_task ( sock: socket.socket ) -> None:
 				log = logger.getChild ( 'main.server_task' )
 				rx, tx = await asyncio.open_connection ( sock = sock )
+				class TestServer ( smtp_aio.Server ):
+					async def on_StartTlsAcceptEvent ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
+						event.reject() # not ready yet
+					
+					async def on_AuthEvent ( self, event: smtp_proto.AuthEvent ) -> None:
+						if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
+							event.accept()
+						else:
+							event.reject()
+					
+					async def on_MailFromEvent ( self, event: smtp_proto.MailFromEvent ) -> None:
+						event.accept() # or .reject()
+					
+					async def on_RcptToEvent ( self, event: smtp_proto.RcptToEvent ) -> None:
+						event.accept() # or .reject()
+					
+					async def on_CompleteEvent ( self, event: smtp_proto.CompleteEvent ) -> None:
+						test.assertEqual ( event.mail_from, 'from@test.com' )
+						test.assertEqual ( event.rcpt_to, [ 'to@test.com' ] )
+						lines = b''.join ( event.data ).split ( b'\r\n' )
+						test.assertEqual ( lines[0], b'From: from@test.com' )
+						test.assertEqual ( lines[1], b'To: to@test.com' )
+						test.assertEqual ( lines[2], b'Subject: Test email' )
+						test.assertEqual ( lines[3], b'Date: 2000-01-01T00:00:00Z' )
+						test.assertEqual ( lines[4], b'' )
+						test.assertEqual ( lines[5], b'This is a test. This message does not end in a period, period.' )
+						test.assertEqual ( lines[6], b'.<<< Evil line beginning with a dot' )
+						test.assertEqual ( lines[7], b'Last line of message' )
+						test.assertEqual ( lines[8], b'' )
+						with test.assertRaises ( IndexError ):
+							test.assertEqual ( lines[9], b'?????' )
+						event.accept() # or .reject()
+				
+				srv = TestServer ( 'milliways.local' )
+				
 				try:
-					class TestServer ( smtp_aio.Server ):
-						async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
-							event.reject() # not ready yet
-						
-						async def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None:
-							if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
-								event.accept()
-							else:
-								event.reject()
-						
-						async def on_mail_from ( self, event: smtp_proto.MailFromEvent ) -> None:
-							event.accept() # or .reject()
-						
-						async def on_rcpt_to ( self, event: smtp_proto.RcptToEvent ) -> None:
-							event.accept() # or .reject()
-						
-						async def on_complete ( self, event: smtp_proto.CompleteEvent ) -> None:
-							test.assertEqual ( event.mail_from, 'from@test.com' )
-							test.assertEqual ( event.rcpt_to, [ 'to@test.com' ] )
-							lines = b''.join ( event.data ).split ( b'\r\n' )
-							test.assertEqual ( lines[0], b'From: from@test.com' )
-							test.assertEqual ( lines[1], b'To: to@test.com' )
-							test.assertEqual ( lines[2], b'Subject: Test email' )
-							test.assertEqual ( lines[3], b'Date: 2000-01-01T00:00:00Z' )
-							test.assertEqual ( lines[4], b'' )
-							test.assertEqual ( lines[5], b'This is a test. This message does not end in a period, period.' )
-							test.assertEqual ( lines[6], b'.<<< Evil line beginning with a dot' )
-							test.assertEqual ( lines[7], b'Last line of message' )
-							test.assertEqual ( lines[8], b'' )
-							with test.assertRaises ( IndexError ):
-								test.assertEqual ( lines[9], b'?????' )
-							event.accept() # or .reject()
-					
-					srv = TestServer ( 'milliways.local' )
-					
 					await srv.run ( rx, tx, True )
 				except smtp_proto.Closed:
 					pass

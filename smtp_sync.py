@@ -68,17 +68,17 @@ class Client ( metaclass = ABCMeta ):
 	def quit ( self ) -> smtp_proto.SuccessResponse:
 		return self._send_recv ( smtp_proto.QuitRequest() )
 	
-	def _event ( self, event: smtp_proto.Event ) -> None:
-		log = logger.getChild ( 'Client._event' )
+	def on_SendDataEvent ( self, event: smtp_proto.SendDataEvent ) -> None:
+		log = logger.getChild ( 'Client.on_SendDataEvent' )
+		for chunk in event.chunks:
+			log.debug ( f'S>{b2s(chunk).rstrip()}' )
+			self._write ( chunk )
+	
+	def _on_event ( self, event: smtp_proto.Event ) -> None:
+		log = logger.getChild ( 'Client._on_event' )
 		try:
-			if isinstance ( event, smtp_proto.SendDataEvent ):
-				for chunk in event.chunks:
-					log.debug ( f'C>{b2s(chunk).rstrip()}' ) # TODO FIXME: SendDataEvent.chunks isn't line-based so this log.debug doesn't make sense
-					self._write ( chunk )
-			elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-				self.on_starttls_begin ( event )
-			else:
-				assert False, f'unrecognized {event=}'
+			func = getattr ( self, f'on_{type(event).__name__}' )
+			func ( event )
 		except Exception:
 			event.exc_info = sys.exc_info()
 	
@@ -88,14 +88,14 @@ class Client ( metaclass = ABCMeta ):
 			data: bytes = self._read()
 			log.debug ( f'S>{b2s(data).rstrip()}' )
 			for event in self.cli.receive ( data ):
-				self._event ( event )
+				self._on_event ( event )
 		assert isinstance ( request.response, smtp_proto.SuccessResponse )
 		return request.response
 	
 	def _send_recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._send_recv' )
 		for event in self.cli.send ( request ):
-			self._event ( event )
+			self._on_event ( event )
 		return self._recv ( request )
 	
 	@abstractmethod
@@ -114,9 +114,9 @@ class Client ( metaclass = ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
 	
 	@abstractmethod
-	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
+	def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsBeginEvent()' )
 
 
 class Server ( metaclass = ABCMeta ):
@@ -124,61 +124,76 @@ class Server ( metaclass = ABCMeta ):
 	def __init__ ( self, hostname: str ) -> None:
 		self.hostname = hostname
 	
-	def on_helo_accept ( self, event: smtp_proto.HeloAcceptEvent ) -> None:
+	def on_GreetingAcceptEvent ( self, event: smtp_proto.GreetingAcceptEvent ) -> None:
 		# implementations only need to override this if they want to change the behavior
 		event.accept()
 	
-	def on_ehlo_accept ( self, event: smtp_proto.EhloAcceptEvent ) -> None:
+	def on_HeloAcceptEvent ( self, event: smtp_proto.HeloAcceptEvent ) -> None:
+		# implementations only need to override this if they want to change the behavior
+		event.accept()
+	
+	def on_EhloAcceptEvent ( self, event: smtp_proto.EhloAcceptEvent ) -> None:
 		# implementations only need to override this if they want to change the behavior
 		event.accept()
 	
 	@abstractmethod
-	def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None: # pragma: no cover
+	def on_StartTlsAcceptEvent ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_starttls_accept()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsAcceptEvent()' )
 	
 	@abstractmethod
-	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
+	def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_starttls_begin()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsBeginEvent()' )
 	
 	@abstractmethod
-	def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None: # pragma: no cover
+	def on_AuthEvent ( self, event: smtp_proto.AuthEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_authenticate()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_AuthEvent()' )
 	
-	def on_expn ( self, event: smtp_proto.ExpnEvent ) -> None:
+	def on_ExpnEvent ( self, event: smtp_proto.ExpnEvent ) -> None:
 		event.reject() # NOTE: it isn't required to implement this. The default behavior is to report '550 Access Denied!'
 	
-	def on_vrfy ( self, event: smtp_proto.VrfyEvent ) -> None:
+	def on_VrfyEvent ( self, event: smtp_proto.VrfyEvent ) -> None:
 		event.reject() # NOTE: it isn't required to implement this. The default behavior is to report '550 Access Denied!'
 	
 	@abstractmethod
-	def on_mail_from ( self, event: smtp_proto.MailFromEvent ) -> None: # pragma: no cover
+	def on_MailFromEvent ( self, event: smtp_proto.MailFromEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_mail_from()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_MailFromEvent()' )
 	
 	@abstractmethod
-	def on_rcpt_to ( self, event: smtp_proto.RcptToEvent ) -> None: # pragma: no cover
+	def on_RcptToEvent ( self, event: smtp_proto.RcptToEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_rcpt_to()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_RcptToEvent()' )
 	
 	@abstractmethod
-	def on_complete ( self, event: smtp_proto.CompleteEvent ) -> None: # pragma: no cover
+	def on_CompleteEvent ( self, event: smtp_proto.CompleteEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_rcpt_to()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_complete()' )
+	
+	def on_SendDataEvent ( self, event: smtp_proto.SendDataEvent ) -> None:
+		log = logger.getChild ( 'Server.on_SendDataEvent' )
+		for chunk in event.chunks:
+			log.debug ( f'S>{b2s(chunk).rstrip()}' )
+			self._write ( chunk )
+	
+	def _on_event ( self, event: smtp_proto.Event ) -> None:
+		log = logger.getChild ( 'Server._on_event' )
+		try:
+			func = getattr ( self, f'on_{type(event).__name__}' )
+			func ( event )
+		except Exception:
+			event.exc_info = sys.exc_info()
 	
 	def _run ( self, tls: bool ) -> None:
 		log = logger.getChild ( 'Server._run' )
 		try:
 			srv = smtp_proto.Server ( self.hostname, tls )
 			
-			def _send ( *chunks: bytes ) -> None:
-				for chunk in chunks:
-					log.debug ( f'S>{b2s(chunk).rstrip()}' )
-					self._write ( chunk )
+			for event in srv.startup():
+				self._on_event ( event )
 			
-			_send ( *srv.greeting().chunks ) # TODO FIXME: implementations need an opportunity to override this
 			while True:
 				try:
 					data = self._read()
@@ -186,33 +201,7 @@ class Server ( metaclass = ABCMeta ):
 					raise smtp_proto.Closed ( repr ( e ) ) from e
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
-					try:
-						if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
-							_send ( *event.chunks )
-						elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
-							self.on_rcpt_to ( event )
-						elif isinstance ( event, smtp_proto.HeloAcceptEvent ):
-							self.on_helo_accept ( event )
-						elif isinstance ( event, smtp_proto.EhloAcceptEvent ):
-							self.on_ehlo_accept ( event )
-						elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
-							self.on_starttls_accept ( event )
-						elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-							self.on_starttls_begin ( event )
-						elif isinstance ( event, smtp_proto.AuthEvent ):
-							self.on_authenticate ( event )
-						elif isinstance ( event, smtp_proto.MailFromEvent ):
-							self.on_mail_from ( event )
-						elif isinstance ( event, smtp_proto.CompleteEvent ):
-							self.on_complete ( event )
-						elif isinstance ( event, smtp_proto.ExpnEvent ):
-							self.on_expn ( event )
-						elif isinstance ( event, smtp_proto.VrfyEvent ):
-							self.on_vrfy ( event )
-						else:
-							assert False, f'unrecognized {event=}'
-					except Exception:
-						event.exc_info = sys.exc_info()
+					self._on_event ( event )
 		except smtp_proto.Closed as e:
 			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
 		finally:

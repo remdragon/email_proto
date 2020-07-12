@@ -32,9 +32,8 @@ class Tests ( unittest.TestCase ):
 		
 		def client_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.client_task' )
+			cli = smtp_socket.Client()
 			try:
-				cli = smtp_socket.Client()
-				
 				cli.server_hostname = 'milliways.local'
 				cli.ssl_context = trust.client_context()
 				cli.sock = sock
@@ -104,49 +103,49 @@ class Tests ( unittest.TestCase ):
 		
 		def server_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.server_task' )
-			try:
-				class TestServer ( smtp_socket.Server ):
-					def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
+			
+			class TestServer ( smtp_socket.Server ):
+				def on_StartTlsAcceptEvent ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
+					event.accept()
+				
+				def on_expnvrfy ( self, event: smtp_proto.ExpnVrfyEvent ) -> None:
+					if event.mailbox == 'mike':
+						event.accept ( 'mike@abc.com' )
+					elif event.mailbox == 'users-hackers':
+						event.accept ( 'carol@abc.com', 'greg@abc.com', 'marcha@abc.com', 'peter@abc.com' ) # sheesh, someone was a Brady's Bunch fan
+					else:
+						event.reject()
+				
+				def on_ExpnEvent ( self, event: smtp_proto.ExpnEvent ) -> None:
+					self.on_expnvrfy ( event )
+				
+				def on_VrfyEvent ( self, event: smtp_proto.VrfyEvent ) -> None:
+					self.on_expnvrfy ( event )
+				
+				def on_AuthEvent ( self, event: smtp_proto.AuthEvent ) -> None:
+					if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
 						event.accept()
-					
-					def on_expnvrfy ( self, event: smtp_proto.ExpnVrfyEvent ) -> None:
-						if event.mailbox == 'mike':
-							event.accept ( 'mike@abc.com' )
-						elif event.mailbox == 'users-hackers':
-							event.accept ( 'carol@abc.com', 'greg@abc.com', 'marcha@abc.com', 'peter@abc.com' ) # sheesh, someone was a Brady's Bunch fan
-						else:
-							event.reject()
-					
-					def on_expn ( self, event: smtp_proto.ExpnEvent ) -> None:
-						self.on_expnvrfy ( event )
-					
-					def on_vrfy ( self, event: smtp_proto.VrfyEvent ) -> None:
-						self.on_expnvrfy ( event )
-					
-					def on_authenticate ( self, event: smtp_proto.AuthEvent ) -> None:
-						if event.uid == 'Zaphod' and event.pwd == 'Beeblebrox':
-							event.accept()
-						else:
-							event.reject()
-					
-					def on_mail_from ( self, event: smtp_proto.MailFromEvent ) -> None:
-						event.accept() # or .reject()
-					
-					def on_rcpt_to ( self, event: smtp_proto.RcptToEvent ) -> None:
-						event.accept() # or .reject()
-					
-					def on_complete ( self, event: smtp_proto.CompleteEvent ) -> None:
-						log.debug ( f'MAIL FROM: {event.mail_from}' )
-						for rcpt_to in event.rcpt_to:
-							log.debug ( f'RCPT TO: {rcpt_to}' )
-						log.debug ( '-' * 20 )
-						log.debug ( b2s ( b''.join ( event.data ) ) )
-						event.accept() # or .reject()
+					else:
+						event.reject()
 				
-				srv = TestServer ( 'milliways.local' )
+				def on_MailFromEvent ( self, event: smtp_proto.MailFromEvent ) -> None:
+					event.accept() # or .reject()
 				
+				def on_RcptToEvent ( self, event: smtp_proto.RcptToEvent ) -> None:
+					event.accept() # or .reject()
+				
+				def on_CompleteEvent ( self, event: smtp_proto.CompleteEvent ) -> None:
+					log.debug ( f'MAIL FROM: {event.mail_from}' )
+					for rcpt_to in event.rcpt_to:
+						log.debug ( f'RCPT TO: {rcpt_to}' )
+					log.debug ( '-' * 20 )
+					log.debug ( b2s ( b''.join ( event.data ) ) )
+					event.accept() # or .reject()
+			
+			srv = TestServer ( 'milliways.local' )
+			
+			try:
 				srv.ssl_context = trust.server_context()
-				
 				srv.run ( sock, False )
 			except smtp_proto.Closed:
 				pass

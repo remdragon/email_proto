@@ -4,7 +4,7 @@ import packaging
 # email_proto imports:
 import smtp_proto
 
-__version__ = packaging.version.parse ( '0.0.1' )
+__version__ = packaging.version.parse ( '0.0.9' )
 
 '''
 NOTE: the individual protocols aren't automatically imported here because

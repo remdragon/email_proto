@@ -52,8 +52,8 @@ class Client ( Transport, smtp_async.Client ):
 			self._wrap_ssl()
 		await self._connect ( tls )
 	
-	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-		#log = logger.getChild ( 'Client.on_starttls_begin' )
+	async def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+		#log = logger.getChild ( 'Client.on_StartTlsBeginEvent' )
 		self._wrap_ssl()
 	
 	def _wrap_ssl ( self ) -> None:
@@ -73,8 +73,8 @@ class Server ( Transport, smtp_async.Server ):
 		self.stream = stream
 		await self._run ( tls )
 	
-	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
-		#log = logger.getChild ( 'Server.on_starttls_begin' )
+	async def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+		#log = logger.getChild ( 'Server.on_StartTlsBeginEvent' )
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context()
 			self.ssl_context.verify_mode = ssl.CERT_NONE

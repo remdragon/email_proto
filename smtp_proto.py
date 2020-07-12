@@ -152,14 +152,14 @@ class SendDataEvent ( Event ):
 		return f'{cls.__module__}.{cls.__name__}(chunks={self.chunks!r})'
 
 
-class ResponseEvent ( SendDataEvent ):
-	def __init__ ( self, code: int, *lines: str ) -> None:
-		seps = [ '-' ] * len ( lines )
-		seps[-1] = ' '
-		self.chunks = ( s2b ( ''.join (
-			f'{code}{sep}{line}\r\n'
-			for sep, line in zip ( seps, lines )
-		) ), )
+def ResponseEvent ( code: int, *lines: str ) -> SendDataEvent:
+	seps = [ '-' ] * len ( lines )
+	seps[-1] = ' '
+	chunks = ( s2b ( ''.join (
+		f'{code}{sep}{line}\r\n'
+		for sep, line in zip ( seps, lines )
+	) ), )
+	return SendDataEvent ( *chunks )
 
 class AcceptRejectEvent ( Event ):
 	success_code: int
@@ -214,6 +214,15 @@ class AcceptRejectEvent ( Event ):
 			'_message',
 		) )
 		return f'{cls.__module__}.{cls.__name__}({args})'
+
+
+class GreetingAcceptEvent ( AcceptRejectEvent ):
+	success_code = 220
+	error_code = 454
+	error_message = 'SMTP service not available at the moment'
+	
+	def __init__ ( self, server_hostname: str ) -> None:
+		self.success_message = f'{server_hostname} ESMTP'
 
 
 class HeloAcceptEvent ( AcceptRejectEvent ):
@@ -427,7 +436,18 @@ class GreetingRequest ( Request ):
 		yield from _client_proto_recv_done()
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # pragma: no cover
-		assert False # this should never get called
+		# if too busy, can also return:
+		#	421-{self.hostname} is too busy to accept mail right now.
+		#	421 Please come back in {delay} seconds.
+		#	(and server disconnects)
+		# or:
+		#	554 No SMTP service here
+		# 	(server stays connected but 503's everything except QUIT)
+		#	(this is a useful state if remote ip is untrusted via blacklisting/whitelisting )
+		event = GreetingAcceptEvent ( server.hostname )
+		yield from event.go()
+		accepted, code, message = event._accepted()
+		yield ResponseEvent ( code, message )
 
 
 @request_verb ( 'HELO' )
@@ -544,7 +564,11 @@ class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure S
 		yield ResponseEvent ( event1._code, event1._message )
 		yield from StartTlsBeginEvent().go()
 		server.tls = True
-		yield server.greeting()
+		
+		event = GreetingAcceptEvent ( server.hostname )
+		yield from event.go()
+		accepted, code, message = event._accepted()
+		yield ResponseEvent ( code, message )
 
 
 
@@ -645,8 +669,8 @@ class AuthLoginRequest ( _Auth ):
 
 class ExpnVrfyRequest ( Request ):
 	_verb: str
-	_response: Type[ExpnVrfyResponse]
-	_event: Type[ExpnVrfyEvent]
+	_response_cls: Type[ExpnVrfyResponse]
+	_event_cls: Type[ExpnVrfyEvent]
 	
 	def __init__ ( self, mailbox: str ) -> None:
 		self.mailbox = mailbox
@@ -663,7 +687,7 @@ class ExpnVrfyRequest ( Request ):
 			assert tmp is not None
 			lines.append ( tmp.lines[0] )
 			if isinstance ( tmp, SuccessResponse ):
-				raise self._response ( tmp.code, *lines )
+				raise self._response_cls ( tmp.code, *lines )
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # raises: ResponseEvent
 		if not server.client_hostname and server.pedantic:
@@ -672,7 +696,7 @@ class ExpnVrfyRequest ( Request ):
 			raise ResponseEvent ( 513, 'Must authenticate' )
 		if not argtext:
 			raise ResponseEvent ( 501, 'missing required mailbox parameter' )
-		event = self._event ( argtext )
+		event = self._event_cls ( argtext )
 		yield event
 		assert isinstance ( event._code, int )
 		if event._acceptance:
@@ -686,15 +710,15 @@ class ExpnVrfyRequest ( Request ):
 @request_verb ( 'EXPN' )
 class ExpnRequest ( ExpnVrfyRequest ):
 	_verb = 'EXPN'
-	_response = ExpnResponse
-	_event = ExpnEvent
+	_response_cls = ExpnResponse
+	_event_cls = ExpnEvent
 
 
 @request_verb ( 'VRFY' )
 class VrfyRequest ( ExpnVrfyRequest ):
 	_verb = 'VRFY'
-	_response = VrfyResponse
-	_event = VrfyEvent
+	_response_cls = VrfyResponse
+	_event_cls = VrfyEvent
 
 
 @request_verb ( 'MAIL' )
@@ -972,17 +996,10 @@ class Server ( Connection ):
 		super().__init__ ( tls )
 		self.reset()
 	
-	def greeting ( self ) -> ResponseEvent:
-		# TODO FIXME: figure out how to move this to GreetingRequest._server_protocol()
-		# if too busy, can also return:
-		#	421-{self.hostname} is too busy to accept mail right now.
-		#	421 Please come back in {delay} seconds.
-		#	(and server disconnects)
-		# or:
-		#	554 No SMTP service here
-		# 	(server stays connected but 503's everything except QUIT)
-		#	(this is a useful state if remote ip is untrusted via blacklisting/whitelisting )
-		return ResponseEvent ( 220, f'{self.hostname} ESMTP' )
+	def startup ( self ) -> Iterator[Event]:
+		self.request = GreetingRequest()
+		self.request_protocol = self.request._server_protocol ( self, '' )
+		yield from self._run_protocol()
 	
 	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Server._receive_line' )
