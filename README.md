@@ -19,7 +19,7 @@ import getpass
 import from email_proto.smtp_socket import Client # reference synchronous sockets implementation
 
 client = Client()
-client.connect ( 'smtp.yourdomain.com', 465 )
+client.connect ( 'smtp.yourdomain.com', 465, tls = True )
 client.helo ( 'localhost' )
 client.auth ( 'zaphod@beeblebrox.com', getpass.getpass ( 'Password:' ) )
 client.mail_from ( 'zaphod@beeblebrox.com' )
@@ -30,6 +30,7 @@ client.quit()
 
 ## Files
 
+* `__init__`.py: only defines project version
 * `smtp_proto.py`: SMTP protocol implementation sans i/o
 * `smtp_sync.py`: reference sync wrapper of `smtp_proto.py`
 * `smtp_async.py`: reference async wrapper of `smtp_proto.py`
@@ -41,12 +42,24 @@ client.quit()
 
 ## TODO
 
-POP3 and IMAP are planned after SMTP implementation is a little more flushed out.
+STARTTLS implementation in asyncio is WIP. It is untested and feels dirty.
 
 ## Contributing
+
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
 Please make sure to update tests as appropriate.
 
 ## License
 [MIT](https://choosealicense.com/licenses/mit/)
+
+## Version History
+
+* 0.0.1 - initial design & development
+* 0.0.9 - smtp believed feature complete with respect to "minimum" required implementation as defined by RFC.
+
+## Roadmap
+
+* 0.1.0 - smtp_proto.py 100% code coverage via unittests
+* 0.2.0 - pop3 protocol 100% code coverage via unittests
+* 0.4.0 - imap protocol 100% code coverage via unittests
