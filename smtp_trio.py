@@ -32,8 +32,8 @@ class Transport:
 			return
 		raise TimeoutError ( f'{type(self).__module__}.{type(self).__name__} timeout waiting to write {bytes(data)=}' )
 	
-	async def _close ( self ) -> None:
-		#log = logger.getChild ( 'Transport._close' )
+	async def close ( self ) -> None:
+		#log = logger.getChild ( 'Transport.close' )
 		with trio.move_on_after ( 0.05 ):
 			await self.stream.aclose() # TODO FIXME: why sometimes getting hung up when in ssl?
 

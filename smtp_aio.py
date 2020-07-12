@@ -4,6 +4,8 @@ from __future__ import annotations
 from abc import ABCMeta, abstractmethod
 import asyncio
 import logging
+import ssl
+from typing import Optional as Opt
 
 # mail_proto imports:
 import smtp_proto
@@ -39,14 +41,17 @@ class Transport:
 		except asyncio.TimeoutError:
 			raise TimeoutError ( f'{type(self).__module__}.{type(self).__name__} timeout waiting to read data' ) from None
 	
-	async def _close ( self ) -> None:
+	async def close ( self ) -> None:
 		self.tx.close()
 		await self.tx.wait_closed()
 
 
 class Client ( Transport, smtp_async.Client ):
+	server_hostname: Opt[str] = None
+	ssl_context: Opt[ssl.SSLContext] = None
 	
 	async def connect ( self, hostname: str, port: int, tls: bool ) -> None:
+		self.server_hostname = hostname
 		self.rx, self.tx = await asyncio.open_connection (
 			hostname, port, ssl = tls,
 		)
@@ -56,14 +61,19 @@ class Client ( Transport, smtp_async.Client ):
 		#log = logger.getChild ( 'Client.on_starttls_begin' )
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
-		self.rx.transport = self.tx.transport = asyncio.start_tls (
-			self.rx.transport,
+		
+		transport = await asyncio.get_event_loop().start_tls (
+			self.tx.transport,
+			getattr ( self.tx, '_protocol' ),
 			sslcontext = self.ssl_context,
 			server_hostname = self.server_hostname,
 		)
+		self.rx.set_transport ( transport )
+		setattr ( self.tx, '_transport', transport )
 
 
 class Server ( Transport, smtp_async.Server ):
+	ssl_context: Opt[ssl.SSLContext] = None
 	
 	async def run ( self,
 		rx: asyncio.StreamReader,
@@ -79,8 +89,12 @@ class Server ( Transport, smtp_async.Server ):
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context()
 			self.ssl_context.verify_mode = ssl.CERT_NONE
-		self.rx.transport = self.tx.transport = trio.SSLStream (
-			self.rx.transport,
-			ssl_context = self.ssl_context,
+		
+		transport = await asyncio.get_event_loop().start_tls (
+			self.tx.transport,
+			getattr ( self.tx, '_protocol' ),
+			sslcontext = self.ssl_context,
 			server_side = True,
 		)
+		self.rx.set_transport ( transport )
+		setattr ( self.tx, '_transport', transport )

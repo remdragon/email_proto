@@ -25,7 +25,7 @@ class Transport:
 	def _write ( self, data: bytes ) -> None:
 		self.sock.sendall ( data )
 	
-	def _close ( self ) -> None:
+	def close ( self ) -> None:
 		self.sock.close()
 
 
@@ -46,6 +46,7 @@ class Client ( Transport, smtp_sync.Client ):
 				log.warning ( f'Error connecting to {address=}: {e!r}' )
 			else:
 				self._connect ( tls )
+				return
 		raise ConnectionError ( f'Unable to connect to {hostname=} {port=}' )
 	
 	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:

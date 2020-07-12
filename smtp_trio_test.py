@@ -43,6 +43,7 @@ class Tests ( unittest.TestCase ):
 					test.assertEqual ( sorted ( r.lines ), [
 						'8BITMIME',
 						#'AUTH PLAIN LOGIN', # not available because we're not encrypted yet
+						'FUBAR',
 						'PIPELINING',
 						'STARTTLS',
 						'milliways.local greets localhost',
@@ -74,10 +75,10 @@ class Tests ( unittest.TestCase ):
 					
 					if True: # request a non-existent AUTH mechanism
 						class AuthFubarRequest ( smtp_proto.Request ):
-							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> smtp_proto.RequestProtocolGenerator:
 								log = logger.getChild ( 'AuthFubarRequest._client_protocol' )
 								yield from smtp_proto._client_proto_send_recv_done ( f'AUTH FUBAR\r\n' )
-							def _server_protocol ( self, server: smtp_proto.Server, moreargtext: str ) -> Iterator[smtp_proto.Event]:
+							def _server_protocol ( self, server: smtp_proto.Server, moreargtext: str ) -> smtp_proto.RequestProtocolGenerator:
 								assert False
 						with test.assertRaises ( smtp_proto.ErrorResponse ):
 							try:
@@ -88,7 +89,7 @@ class Tests ( unittest.TestCase ):
 					
 					if True: # construct an invalid AUTH PLAIN request to trigger specific error handling in the server-side protocol
 						class BadAuthPlain1Request ( smtp_proto.AuthPlain1Request ):
-							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> smtp_proto.RequestProtocolGenerator:
 								log = logger.getChild ( 'HeloRequest._client_protocol' )
 								yield from smtp_proto._client_proto_send_recv_done ( f'AUTH PLAIN BAADF00D\r\n' )
 						with test.assertRaises ( smtp_proto.ErrorResponse ):
@@ -140,7 +141,7 @@ class Tests ( unittest.TestCase ):
 					
 					with test.assertRaises ( smtp_proto.ErrorResponse ):
 						class MailFrumRequest ( smtp_proto.MailFromRequest ):
-							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> smtp_proto.RequestProtocolGenerator:
 								yield from smtp_proto._client_proto_send_recv_done ( f'MAIL FRUM:<{self.mail_from}>\r\n' )
 						try:
 							await cli._send_recv ( MailFrumRequest ( 'foo@bar.com' ) )
@@ -166,7 +167,7 @@ class Tests ( unittest.TestCase ):
 					
 					with test.assertRaises ( smtp_proto.ErrorResponse ):
 						class RcptTooRequest ( smtp_proto.RcptToRequest ):
-							def _client_protocol ( self, client: smtp_proto.Client ) -> Iterator[smtp_proto.Event]:
+							def _client_protocol ( self, client: smtp_proto.Client ) -> smtp_proto.RequestProtocolGenerator:
 								yield from smtp_proto._client_proto_send_recv_done ( f'RCPT TOO:<{self.rcpt_to}>\r\n' )
 						try:
 							await cli._send_recv ( RcptTooRequest ( 'foo@bar.com' ) )
@@ -212,12 +213,16 @@ class Tests ( unittest.TestCase ):
 				except smtp_proto.Closed as e: # pragma: no cover
 					log.debug ( f'server closed connection: {e=}' )
 				finally:
-					await cli._close()
+					await cli.close()
 			
 			async def server_task ( stream: trio.abc.Stream ) -> None:
 				log = logger.getChild ( 'main.server_task' )
 				try:
 					class TestServer ( smtp_trio.Server ):
+						async def on_ehlo_accept ( self, event: smtp_proto.EhloAcceptEvent ) -> None:
+							event.esmtp_features['FUBAR'] = ''
+							event.accept()
+						
 						async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
 							event.accept()
 						
@@ -264,7 +269,7 @@ class Tests ( unittest.TestCase ):
 				except smtp_proto.Closed:
 					pass
 				finally:
-					await srv._close()
+					await srv.close()
 			
 			async with trio.open_nursery() as nursery:
 				nursery.start_soon ( client_task, thing1 )

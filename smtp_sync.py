@@ -1,6 +1,7 @@
 # system imports:
 from abc import ABCMeta, abstractmethod
 import logging
+import sys
 
 # email_proto imports:
 import smtp_proto
@@ -69,20 +70,17 @@ class Client ( metaclass = ABCMeta ):
 	
 	def _event ( self, event: smtp_proto.Event ) -> None:
 		log = logger.getChild ( 'Client._event' )
-		if isinstance ( event, smtp_proto.SendDataEvent ):
-			try:
+		try:
+			if isinstance ( event, smtp_proto.SendDataEvent ):
 				for chunk in event.chunks:
 					log.debug ( f'C>{b2s(chunk).rstrip()}' ) # TODO FIXME: SendDataEvent.chunks isn't line-based so this log.debug doesn't make sense
 					self._write ( chunk )
-			except Exception as e:
-				event.exception = e
-		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-			try:
+			elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
 				self.on_starttls_begin ( event )
-			except Exception as e:
-				event.exception = e
-		else:
-			assert False, f'unrecognized {event=}'
+			else:
+				assert False, f'unrecognized {event=}'
+		except Exception:
+			event.exc_info = sys.exc_info()
 	
 	def _recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._recv' )
@@ -111,22 +109,28 @@ class Client ( metaclass = ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._write()' )
 	
 	@abstractmethod
-	def _close ( self ) -> None:
+	def close ( self ) -> None:
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
 	
 	@abstractmethod
 	def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
 
 
 class Server ( metaclass = ABCMeta ):
-	esmtp_8bitmime: bool = True
-	esmtp_pipelining: bool = True
 	
 	def __init__ ( self, hostname: str ) -> None:
 		self.hostname = hostname
+	
+	def on_helo_accept ( self, event: smtp_proto.HeloAcceptEvent ) -> None:
+		# implementations only need to override this if they want to change the behavior
+		event.accept()
+	
+	def on_ehlo_accept ( self, event: smtp_proto.EhloAcceptEvent ) -> None:
+		# implementations only need to override this if they want to change the behavior
+		event.accept()
 	
 	@abstractmethod
 	def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None: # pragma: no cover
@@ -168,15 +172,13 @@ class Server ( metaclass = ABCMeta ):
 		log = logger.getChild ( 'Server._run' )
 		try:
 			srv = smtp_proto.Server ( self.hostname, tls )
-			srv.esmtp_8bitmime = self.esmtp_8bitmime
-			srv.esmtp_pipelining = self.esmtp_pipelining
 			
 			def _send ( *chunks: bytes ) -> None:
 				for chunk in chunks:
 					log.debug ( f'S>{b2s(chunk).rstrip()}' )
 					self._write ( chunk )
 			
-			_send ( srv.greeting() )
+			_send ( *srv.greeting().chunks ) # TODO FIXME: implementations need an opportunity to override this
 			while True:
 				try:
 					data = self._read()
@@ -184,36 +186,37 @@ class Server ( metaclass = ABCMeta ):
 					raise smtp_proto.Closed ( repr ( e ) ) from e
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
-					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
-						try:
+					try:
+						if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
 							_send ( *event.chunks )
-						except Exception as e:
-							event.exception = e
-					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
-						self.on_rcpt_to ( event )
-					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
-						self.on_starttls_accept ( event )
-					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-						try:
+						elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
+							self.on_rcpt_to ( event )
+						elif isinstance ( event, smtp_proto.HeloAcceptEvent ):
+							self.on_helo_accept ( event )
+						elif isinstance ( event, smtp_proto.EhloAcceptEvent ):
+							self.on_ehlo_accept ( event )
+						elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
+							self.on_starttls_accept ( event )
+						elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
 							self.on_starttls_begin ( event )
-						except Exception as e:
-							event.exception = e
-					elif isinstance ( event, smtp_proto.AuthEvent ):
-						self.on_authenticate ( event )
-					elif isinstance ( event, smtp_proto.MailFromEvent ):
-						self.on_mail_from ( event )
-					elif isinstance ( event, smtp_proto.CompleteEvent ):
-						self.on_complete ( event )
-					elif isinstance ( event, smtp_proto.ExpnEvent ):
-						self.on_expn ( event )
-					elif isinstance ( event, smtp_proto.VrfyEvent ):
-						self.on_vrfy ( event )
-					else:
-						assert False, f'unrecognized {event=}'
+						elif isinstance ( event, smtp_proto.AuthEvent ):
+							self.on_authenticate ( event )
+						elif isinstance ( event, smtp_proto.MailFromEvent ):
+							self.on_mail_from ( event )
+						elif isinstance ( event, smtp_proto.CompleteEvent ):
+							self.on_complete ( event )
+						elif isinstance ( event, smtp_proto.ExpnEvent ):
+							self.on_expn ( event )
+						elif isinstance ( event, smtp_proto.VrfyEvent ):
+							self.on_vrfy ( event )
+						else:
+							assert False, f'unrecognized {event=}'
+					except Exception:
+						event.exc_info = sys.exc_info()
 		except smtp_proto.Closed as e:
 			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
 		finally:
-			self._close()
+			self.close()
 	
 	@abstractmethod
 	def _read ( self ) -> bytes:
@@ -226,6 +229,6 @@ class Server ( metaclass = ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}()' )
 	
 	@abstractmethod
-	def _close ( self ) -> None:
+	def close ( self ) -> None:
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )

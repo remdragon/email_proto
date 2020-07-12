@@ -100,7 +100,7 @@ class Tests ( unittest.TestCase ):
 			except Exception:
 				log.exception ( 'Unexpected client_task exception:' )
 			finally:
-				cli._close()
+				cli.close()
 		
 		def server_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.server_task' )
@@ -153,7 +153,7 @@ class Tests ( unittest.TestCase ):
 			except Exception:
 				log.exception ( 'Unexpected server_task exception:' )
 			finally:
-				srv._close()
+				srv.close()
 		
 		thread1 = threading.Thread ( target = partial ( client_task, thing1 ), name = 'SocketClientThread' )
 		thread2 = threading.Thread ( target = partial ( server_task, thing2 ), name = 'SocketServerThread' )
@@ -225,7 +225,7 @@ class Tests ( unittest.TestCase ):
 			except Exception:
 				log.exception ( 'Unexpected client_task exception:' )
 			finally:
-				cli._close()
+				cli.close()
 		
 		def server_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.server_task' )
@@ -267,6 +267,33 @@ class Tests ( unittest.TestCase ):
 		
 		thread1.join()
 		thread2.join()
+	
+	if False:
+		def test_hmailserver ( self ) -> None:
+			log = logger.getChild ( 'Tests.test_hmailserver' )
+			mail_from = 'ford.prefect@milliways.local'
+			rcpt_to = 'zaphod@milliways.local'
+			from email.message import EmailMessage
+			msg = EmailMessage()
+			msg['From'] = mail_from
+			msg['To'] = rcpt_to
+			msg['Subject'] = 'Re: Lunch?'
+			msg.set_content ( 'Ask Marvin' )
+			
+			client = smtp_socket.Client()
+			client.connect ( '127.0.0.1', 587, False )
+			r1 = client.ehlo ( 'localhost' )
+			if 'STARTTLS' in r1.esmtp_features:
+				client.starttls()
+			else:
+				log.warning ( 'STARTTLS not advertised!' )
+			client.auth_login ( rcpt_to, 'Beeblebrox' )
+			client.mail_from ( mail_from )
+			client.rcpt_to ( rcpt_to )
+			r = client.data ( bytes ( msg ).replace ( b'\n', b'\r\n' ) )
+			print ( f'{r=}' )
+			client.quit()
+			client.close()
 
 if __name__ == '__main__':
 	logging.basicConfig ( level = logging.DEBUG )

@@ -6,9 +6,10 @@ import base64
 import logging
 import re
 import traceback
+from types import TracebackType
 from typing import (
-	Callable, Dict, Iterable, Iterator, List, Optional as Opt, Sequence as Seq,
-	Set, Tuple, Type, TypeVar, Union,
+	Callable, Dict, Generator, Iterable, Iterator, List, Optional as Opt,
+	Sequence as Seq, Set, Tuple, Type, TypeVar, Union,
 )
 
 logger = logging.getLogger ( __name__ )
@@ -47,19 +48,16 @@ class ProtocolError ( Exception ):
 #region EVENTS ----------------------------------------------------------------
 
 class Event ( Exception ):
+	exc_info: Opt[Union[Tuple[Type[BaseException],BaseException,TracebackType],Tuple[None,None,None]]] = None
+	
+	def go ( self ) -> Iterator[Event]:
+		yield self
+	
 	def __repr__ ( self ) -> str:
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}()'
 
-class ThrowableEvent ( Event ):
-	exception: Opt[Exception] = None # TODO FIXME: BaseException?
-	
-	def go ( self ) -> Iterator[Event]:
-		yield self
-		if self.exception:
-			raise self.exception
-
-class SendDataEvent ( ThrowableEvent ):
+class SendDataEvent ( Event ):
 	
 	def __init__ ( self, *chunks: bytes ) -> None:
 		self.chunks: Seq[bytes] = chunks
@@ -132,6 +130,23 @@ class AcceptRejectEvent ( Event ):
 		return f'{cls.__module__}.{cls.__name__}({args})'
 
 
+class HeloAcceptEvent ( AcceptRejectEvent ):
+	success_code = 250
+	success_message = '' # customized by HeloRequest._server_protocol
+	error_code = 454
+	error_message = 'SMTP service not available at the moment'
+
+
+class EhloAcceptEvent ( AcceptRejectEvent ):
+	success_code = 250
+	success_message = '' # customized by EhloRequest._server_protocol
+	error_code = 454
+	error_message = 'SMTP service not available at the moment'
+	
+	esmtp_auth: Set[str]
+	esmtp_features: Dict[str,str]
+
+
 class StartTlsAcceptEvent ( AcceptRejectEvent ):
 	success_code = 220
 	success_message = 'Go ahead, make my day'
@@ -139,7 +154,7 @@ class StartTlsAcceptEvent ( AcceptRejectEvent ):
 	error_message = 'TLS not available at the moment'
 
 
-class StartTlsBeginEvent ( ThrowableEvent ):
+class StartTlsBeginEvent ( Event ):
 	pass
 
 
@@ -270,7 +285,7 @@ class Response ( Exception ):
 		return f'{cls.__module__}.{cls.__name__}({self.code!r}, {", ".join(map(repr,self.lines))})'
 
 
-class NeedDataEvent ( ThrowableEvent ):
+class NeedDataEvent ( Event ):
 	data: Opt[bytes] = None
 	response: Opt[Response] = None
 	
@@ -279,7 +294,7 @@ class NeedDataEvent ( ThrowableEvent ):
 		self.response = None
 		return self
 	
-	def go ( self ) -> Iterator[NeedDataEvent]:
+	def go ( self ) -> Iterator[Event]:
 		self.reset()
 		yield from super().go()
 
@@ -374,6 +389,8 @@ def auth_plugin ( name: str ) -> Callable[[Type[_Auth]],Type[_Auth]]:
 	return registrar
 
 
+RequestProtocolGenerator = Generator[Event,None,None]
+
 class Request ( metaclass = ABCMeta ):
 	# TODO FIXME: this will become the basis of all client/server command handling
 	# maybe rename to Command?
@@ -390,22 +407,22 @@ class Request ( metaclass = ABCMeta ):
 		return f'{cls.__module__}.{cls.__name__}()'
 	
 	@abstractmethod
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]: # pragma: no cover
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._client_protocol()' )
 	
 	@abstractmethod
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]: # pragma: no cover
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._server_protocol()' )
 
 
 class GreetingRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
 		yield from _client_proto_recv_done()
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]: # pragma: no cover
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # pragma: no cover
 		assert False # this should never get called
 
 
@@ -414,18 +431,26 @@ class HeloRequest ( Request ):
 	def __init__ ( self, domain: str ) -> None:
 		self.domain = domain
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'HeloRequest._client_protocol' )
 		yield from _client_proto_send_recv_done ( f'HELO {self.domain}\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not argtext:
 			raise ResponseEvent ( 501, 'missing required hostname parameter' )
 		if server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'you already said HELO RFC1869#4.2' )
-		else:
-			server.client_hostname = argtext
-			raise ResponseEvent ( 250, f'{server.hostname} greets {server.client_hostname}' )
+		
+		client_hostname = argtext
+		
+		event = HeloAcceptEvent()
+		event.success_message = f'{server.hostname} greets {client_hostname}'
+		
+		yield from event.go()
+		
+		server.client_hostname = client_hostname
+		
+		raise ResponseEvent ( event._code, event._message )
 
 
 @request_verb ( 'EHLO' )
@@ -434,7 +459,7 @@ class EhloRequest ( Request ):
 	def __init__ ( self, domain: str ) -> None:
 		self.domain = domain
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'EhloRequest._client_protocol' )
 		yield from _client_proto_send ( f'EHLO {self.domain}\r\n' )
 		event = NeedDataEvent()
@@ -450,8 +475,6 @@ class EhloRequest ( Request ):
 			line = tmp.lines[0]
 			lines.append ( line )
 			
-			# TODO FIXME: some kind of plugin system so this is not hard-coded maybe?
-			log.debug ( f'{line=}' )
 			if line.startswith ( 'AUTH ' ):
 				for auth in line.split ( ' ' )[1:]:
 					esmtp_auth.add ( auth )
@@ -464,38 +487,50 @@ class EhloRequest ( Request ):
 				r.esmtp_auth = esmtp_auth
 				raise r
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not argtext:
 			raise ResponseEvent ( 501, 'missing required hostname parameter' )
 		if server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'you already said HELO RFC1869#4.2' )
-		server.client_hostname = argtext
-		lines: List[str] = [ f'{server.hostname} greets {server.client_hostname}' ]
-		if server.esmtp_8bitmime:
-			lines.append ( '8BITMIME' )
-		available_auth_plugins = [
+		
+		client_hostname = argtext
+		
+		event = EhloAcceptEvent()
+		event.esmtp_features = dict ( server.esmtp_features )
+		if not server.tls:
+			event.esmtp_features['STARTTLS'] = ''
+		event.esmtp_auth = set ( [
 			name for name, plugin in _auth_plugins.items()
 			if server.tls or not plugin.tls_required
-		]
-		for line in _auth_lines ( available_auth_plugins ):
+		] )
+		event.success_message = f'{server.hostname} greets {client_hostname}'
+		
+		yield from event.go()
+		
+		server.client_hostname = client_hostname
+		
+		lines: List[str] = [ event.success_message ]
+		for name, value in event.esmtp_features.items():
+			if value:
+				lines.append ( f'{name} {value}' )
+			else:
+				lines.append ( name )
+		for line in _auth_lines ( event.esmtp_auth ):
 			lines.append ( line )
-		if server.esmtp_pipelining:
-			lines.append ( 'PIPELINING' )
-		if not server.tls:
-			lines.append ( 'STARTTLS' )
+		
 		yield ResponseEvent ( 250, *lines )
 
 
 @request_verb ( 'STARTTLS' )
 class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure SMTP over Transport Layer Security
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'StartTlsRequest._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'STARTTLS\r\n' )
 		yield from ( event := StartTlsBeginEvent() ).go()
 		client.tls = True
 		yield from _client_proto_recv_done()
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'StartTlsRequest._server_protocol' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
@@ -505,7 +540,7 @@ class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure S
 		yield ResponseEvent ( event1._code, event1._message )
 		yield from StartTlsBeginEvent().go()
 		server.tls = True
-		yield ResponseEvent ( 220, f'{server.hostname} ESMTP' )
+		yield server.greeting()
 
 
 
@@ -517,10 +552,10 @@ class _Auth ( Request ):
 		self.uid = uid
 		self.pwd = pwd
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]: # pragma: no cover
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
 		assert False # not used
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( '_Auth._server_protocol' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
@@ -536,7 +571,7 @@ class _Auth ( Request ):
 		plugin: _Auth = plugincls.__new__ ( plugincls ) # bypass __init__()
 		yield from plugin._server_protocol ( server, moreargtext[0] if moreargtext else '' )
 	
-	def _on_authenticate ( self, server: Server, uid: str, pwd: str ) -> Iterator[Event]:
+	def _on_authenticate ( self, server: Server, uid: str, pwd: str ) -> RequestProtocolGenerator:
 		yield from ( event := AuthEvent ( uid, pwd ) ).go()
 		server.auth_mailbox = uid
 		yield ResponseEvent ( event._code, event._message )
@@ -544,10 +579,10 @@ class _Auth ( Request ):
 
 @auth_plugin ( 'PLAIN' )
 class AuthPlainRequest ( _Auth ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]: # pragma: no cover
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
 		assert False # use AuthPlain1Request or AuthPlain2Request below
 	
-	def _server_protocol ( self, server: Server, moreargtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'AuthPlainRequest._server_protocol' )
 		try:
 			if not ( authtext := moreargtext ):
@@ -563,13 +598,13 @@ class AuthPlainRequest ( _Auth ):
 
 
 class AuthPlain1Request ( AuthPlainRequest ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'AuthPlain1Request._client_protocol' )
 		authtext = b64_encode ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
 		yield from _client_proto_send_recv_done ( f'AUTH PLAIN {authtext}\r\n' )
 
 class AuthPlain2Request ( AuthPlainRequest ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'AuthPlain2Request._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'AUTH PLAIN\r\n' )
 		authtext = b64_encode ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
@@ -579,13 +614,13 @@ class AuthPlain2Request ( AuthPlainRequest ):
 @auth_plugin ( 'LOGIN' )
 class AuthLoginRequest ( _Auth ):
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'AuthLoginRequest._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'AUTH LOGIN\r\n' )
 		yield from _client_proto_send_recv_ok ( f'{b64_encode(self.uid)}\r\n' )
 		yield from _client_proto_send_recv_done ( f'{b64_encode(self.pwd)}\r\n' )
 	
-	def _server_protocol ( self, server: Server, moreargtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'AuthLoginRequest._server_protocol' )
 		if moreargtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no extra parameters allowed)' )
@@ -612,7 +647,7 @@ class ExpnVrfyRequest ( Request ):
 	def __init__ ( self, mailbox: str ) -> None:
 		self.mailbox = mailbox
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'ExpnRequest._client_protocol' )
 		yield from _client_proto_send ( f'{self._verb} {self.mailbox}\r\n' )
 		event = NeedDataEvent()
@@ -626,7 +661,7 @@ class ExpnVrfyRequest ( Request ):
 			if isinstance ( tmp, SuccessResponse ):
 				raise self._response ( tmp.code, *lines )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]: # raises: ResponseEvent
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # raises: ResponseEvent
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
 		if not server.auth_mailbox:
@@ -663,11 +698,11 @@ class MailFromRequest ( Request ):
 	def __init__ ( self, mail_from: str ) -> None:
 		self.mail_from = mail_from
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'MailFromRequest._client_protocol' )
 		yield from _client_proto_send_recv_done ( f'MAIL FROM:<{self.mail_from}>\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
 		if not server.auth_mailbox:
@@ -689,11 +724,11 @@ class RcptToRequest ( Request ):
 	def __init__ ( self, rcpt_to: str ) -> None:
 		self.rcpt_to = rcpt_to
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'RcptToRequest._client_protocol' )
 		yield from _client_proto_send_recv_done ( f'RCPT TO:<{self.rcpt_to}>\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
 		if not server.auth_mailbox:
@@ -718,7 +753,7 @@ class DataRequest ( Request ):
 		assert isinstance ( payload, bytes_types ) and len ( payload ) > 0
 		self.payload: bytes = payload # only used on client side because on server side it is accumulated in Server.data
 	
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'DataRequest._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'DATA\r\n' )
 		payload = memoryview ( self.payload ) # avoid data copying when we start slicing it later
@@ -738,7 +773,7 @@ class DataRequest ( Request ):
 		yield from SendDataEvent ( *parts ).go()
 		yield from _client_proto_send_recv_done ( '.\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'DataRequest._server_protocol' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
@@ -770,10 +805,10 @@ class DataRequest ( Request ):
 
 @request_verb ( 'RSET' )
 class RsetRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		yield from _client_proto_send_recv_done ( 'RSET\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if argtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
 		server.reset()
@@ -782,21 +817,21 @@ class RsetRequest ( Request ):
 
 @request_verb ( 'NOOP' )
 class NoOpRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		yield from _client_proto_send_recv_done ( 'NOOP\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		# FYI `argtext` is ignored per RFC 5321 4.1.1.9
 		yield ResponseEvent ( 250, 'OK' )
 
 
 @request_verb ( 'QUIT' )
 class QuitRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'QuitRequest._client_protocol' )
 		yield from _client_proto_send_recv_done ( 'QUIT\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if argtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
 		yield ResponseEvent ( 221, 'Closing connection' )
@@ -808,7 +843,7 @@ class QuitRequest ( Request ):
 class Connection ( metaclass = ABCMeta ):
 	_buf: bytes = b''
 	request: Opt[Request] = None
-	request_protocol: Opt[Iterator[Event]] = None
+	request_protocol: Opt[Generator[Event,None,None]] = None
 	need_data: Opt[NeedDataEvent] = None
 	tls: bool # whether or not the connection is currently encrypted
 	
@@ -860,6 +895,8 @@ class Connection ( metaclass = ABCMeta ):
 					return
 				else:
 					yield event
+					if event.exc_info:
+						self.request_protocol.throw ( *event.exc_info )
 		except Closed as e:
 			#log.debug ( f'protocol indicated connection closure: {e=}' )
 			self.request = None
@@ -920,8 +957,10 @@ class Server ( Connection ):
 	rcpt_to: List[str]
 	data: List[bytes]
 	pedantic: bool = True # set this to False to relax behaviors that cause no harm for the protocol ( like double-HELO )
-	esmtp_pipelining: bool = True # advertise that we support PIPELINING
-	esmtp_8bitmime: bool = True # this currently doesn't do anything except advertise on EHLO ( not sure anything else is necessary )
+	esmtp_features: Dict[str,str] = {
+		'8BITMIME': '', # should work out of the box?
+		'PIPELINING': '', # should work out of the box
+	}
 	
 	def __init__ ( self, hostname: str, tls: bool ) -> None:
 		assert isinstance ( hostname, str ) and not _r_eol.search ( hostname ), f'invalid {hostname=}'
@@ -929,7 +968,7 @@ class Server ( Connection ):
 		super().__init__ ( tls )
 		self.reset()
 	
-	def greeting ( self ) -> bytes:
+	def greeting ( self ) -> ResponseEvent:
 		# TODO FIXME: figure out how to move this to GreetingRequest._server_protocol()
 		# if too busy, can also return:
 		#	421-{self.hostname} is too busy to accept mail right now.
@@ -939,7 +978,7 @@ class Server ( Connection ):
 		#	554 No SMTP service here
 		# 	(server stays connected but 503's everything except QUIT)
 		#	(this is a useful state if remote ip is untrusted via blacklisting/whitelisting )
-		return s2b ( f'220 {self.hostname} ESMTP\r\n' )
+		return ResponseEvent ( 220, f'{self.hostname} ESMTP' )
 	
 	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Server._receive_line' )

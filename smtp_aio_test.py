@@ -36,7 +36,9 @@ class Tests ( unittest.TestCase ):
 					test.assertEqual ( type ( r ), smtp_proto.EhloResponse )
 					test.assertEqual ( r.code, 250 )
 					test.assertEqual ( sorted ( r.lines ), [
+						'8BITMIME',
 						'AUTH PLAIN LOGIN', # TODO FIXME WARNING: we are *pretending* to be in ssl in this test
+						'PIPELINING',
 						#'STARTTLS', # not available because smtp_proto thinks we're already encrypted
 						'milliways.local greets localhost',
 					] )
@@ -77,7 +79,7 @@ class Tests ( unittest.TestCase ):
 				except smtp_proto.Closed as e: # pragma: no cover
 					log.debug ( f'server closed connection: {e=}' )
 				finally:
-					await cli._close()
+					await cli.close()
 			
 			async def server_task ( sock: socket.socket ) -> None:
 				log = logger.getChild ( 'main.server_task' )
@@ -117,14 +119,12 @@ class Tests ( unittest.TestCase ):
 							event.accept() # or .reject()
 					
 					srv = TestServer ( 'milliways.local' )
-					srv.esmtp_pipelining = False # code coverage reasons
-					srv.esmtp_8bitmime = False # code coverage reasons
 					
 					await srv.run ( rx, tx, True )
 				except smtp_proto.Closed:
 					pass
 				finally:
-					await srv._close()
+					await srv.close()
 			
 			task1 = asyncio.create_task ( client_task ( thing1 ) )
 			task2 = asyncio.create_task ( server_task ( thing2 ) )

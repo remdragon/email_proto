@@ -1,6 +1,7 @@
 # system imports:
 from abc import ABCMeta, abstractmethod
 import logging
+import sys
 
 # email_proto imports:
 import smtp_proto
@@ -40,7 +41,7 @@ class Client ( metaclass = ABCMeta ):
 		return await self._send_recv ( smtp_proto.AuthLoginRequest ( uid, pwd ) )
 	
 	async def expn ( self, mailbox: str ) -> smtp_proto.ExpnResponse:
-		r = await self._send_recv ( smtp_proto.VrfyRequest ( mailbox ) )
+		r = await self._send_recv ( smtp_proto.ExpnRequest ( mailbox ) )
 		assert isinstance ( r, smtp_proto.ExpnResponse )
 		return r
 	
@@ -69,20 +70,17 @@ class Client ( metaclass = ABCMeta ):
 	
 	async def _event ( self, event: smtp_proto.Event ) -> None:
 		log = logger.getChild ( 'Client._event' )
-		if isinstance ( event, smtp_proto.SendDataEvent ):
-			try:
+		try:
+			if isinstance ( event, smtp_proto.SendDataEvent ):
 				for chunk in event.chunks:
 					log.debug ( f'C>{b2s(chunk).rstrip()}' ) # TODO FIXME: SendDataEvent.chunks isn't line-based so this log.debug doesn't make sense
 					await self._write ( chunk )
-			except Exception as e:
-				event.exception = e
-		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-			try:
+			elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
 				await self.on_starttls_begin ( event )
-			except Exception as e:
-				event.exception = e
-		else:
-			assert False, f'unrecognized {event=}'
+			else:
+				assert False, f'unrecognized {event=}'
+		except Exception:
+			event.exc_info = sys.exc_info()
 	
 	async def _recv ( self, request: smtp_proto.Request ) -> smtp_proto.SuccessResponse:
 		log = logger.getChild ( 'Client._recv' )
@@ -111,14 +109,14 @@ class Client ( metaclass = ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._write()' )
 	
 	@abstractmethod
-	async def _close ( self ) -> None:
+	async def close ( self ) -> None:
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
 	
 	@abstractmethod
 	async def on_starttls_begin ( self, event: smtp_proto.StartTlsBeginEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
 
 
 class Server ( metaclass = ABCMeta ):
@@ -127,6 +125,14 @@ class Server ( metaclass = ABCMeta ):
 	
 	def __init__ ( self, hostname: str ) -> None:
 		self.hostname = hostname
+	
+	async def on_helo_accept ( self, event: smtp_proto.HeloAcceptEvent ) -> None:
+		# implementations only need to override this if they want to change the behavior
+		event.accept()
+	
+	async def on_ehlo_accept ( self, event: smtp_proto.EhloAcceptEvent ) -> None:
+		# implementations only need to override this if they want to change the behavior
+		event.accept()
 	
 	@abstractmethod
 	async def on_starttls_accept ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None: # pragma: no cover
@@ -168,15 +174,13 @@ class Server ( metaclass = ABCMeta ):
 		log = logger.getChild ( 'Server._run' )
 		try:
 			srv = smtp_proto.Server ( self.hostname, tls )
-			srv.esmtp_8bitmime = self.esmtp_8bitmime
-			srv.esmtp_pipelining = self.esmtp_pipelining
 			
 			async def _send ( *chunks: bytes ) -> None:
 				for chunk in chunks:
 					log.debug ( f'S>{b2s(chunk).rstrip()}' )
 					await self._write ( chunk )
 			
-			await _send ( srv.greeting() )
+			await _send ( *srv.greeting().chunks ) # TODO FIXME: implementations need an opportunity to override this
 			while True:
 				try:
 					data = await self._read()
@@ -184,36 +188,37 @@ class Server ( metaclass = ABCMeta ):
 					raise smtp_proto.Closed ( repr ( e ) ) from e
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
-					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
-						try:
+					try:
+						if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
 							await _send ( *event.chunks )
-						except Exception as e:
-							event.exception = e
-					elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
-						await self.on_rcpt_to ( event )
-					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
-						await self.on_starttls_accept ( event )
-					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-						try:
+						elif isinstance ( event, smtp_proto.RcptToEvent ): # 2nd most common event
+							await self.on_rcpt_to ( event )
+						elif isinstance ( event, smtp_proto.HeloAcceptEvent ):
+							await self.on_helo_accept ( event )
+						elif isinstance ( event, smtp_proto.EhloAcceptEvent ):
+							await self.on_ehlo_accept ( event )
+						elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
+							await self.on_starttls_accept ( event )
+						elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
 							await self.on_starttls_begin ( event )
-						except Exception as e:
-							event.exception = e
-					elif isinstance ( event, smtp_proto.AuthEvent ):
-						await self.on_authenticate ( event )
-					elif isinstance ( event, smtp_proto.MailFromEvent ):
-						await self.on_mail_from ( event )
-					elif isinstance ( event, smtp_proto.CompleteEvent ):
-						await self.on_complete ( event )
-					elif isinstance ( event, smtp_proto.ExpnEvent ):
-						await self.on_expn ( event )
-					elif isinstance ( event, smtp_proto.VrfyEvent ):
-						await self.on_vrfy ( event )
-					else:
-						assert False, f'unrecognized {event=}'
+						elif isinstance ( event, smtp_proto.AuthEvent ):
+							await self.on_authenticate ( event )
+						elif isinstance ( event, smtp_proto.MailFromEvent ):
+							await self.on_mail_from ( event )
+						elif isinstance ( event, smtp_proto.CompleteEvent ):
+							await self.on_complete ( event )
+						elif isinstance ( event, smtp_proto.ExpnEvent ):
+							await self.on_expn ( event )
+						elif isinstance ( event, smtp_proto.VrfyEvent ):
+							await self.on_vrfy ( event )
+						else:
+							assert False, f'unrecognized {event=}'
+					except Exception:
+						event.exc_info = sys.exc_info()
 		except smtp_proto.Closed as e:
 			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
 		finally:
-			await self._close()
+			await self.close()
 	
 	@abstractmethod
 	async def _read ( self ) -> bytes:
@@ -226,6 +231,6 @@ class Server ( metaclass = ABCMeta ):
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}()' )
 	
 	@abstractmethod
-	async def _close ( self ) -> None:
+	async def close ( self ) -> None:
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._close()' )
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
