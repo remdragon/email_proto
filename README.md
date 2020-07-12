@@ -55,11 +55,11 @@ Please make sure to update tests as appropriate.
 
 ## Version History
 
-* 0.0.1 - initial design & development
+* 0.1.0 - smtp_proto.py 100% code coverage via unittests
 * 0.0.9 - smtp believed feature complete with respect to "minimum" required implementation as defined by RFC.
+* 0.0.1 - initial design & development
 
 ## Roadmap
 
-* 0.1.0 - smtp_proto.py 100% code coverage via unittests
 * 0.2.0 - pop3 protocol 100% code coverage via unittests
 * 0.4.0 - imap protocol 100% code coverage via unittests

@@ -43,6 +43,28 @@ class Tests ( unittest.TestCase ):
 					"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 				)
 				
+				with self.assertRaises ( smtp_proto.ErrorResponse ):
+					try:
+						r = smtp_proto.HeloRequest ( 'localhost' )
+						r.domain = ''
+						return cli._send_recv ( r )
+					except smtp_proto.ErrorResponse as e:
+						self.assertEqual ( repr ( e ),
+							"smtp_proto.ErrorResponse(501, 'missing required hostname parameter')",
+						)
+						raise
+				
+				with self.assertRaises ( smtp_proto.ErrorResponse ):
+					try:
+						r = smtp_proto.EhloRequest ( 'localhost' )
+						r.domain = ''
+						return cli._send_recv ( r )
+					except smtp_proto.ErrorResponse as e:
+						self.assertEqual ( repr ( e ),
+							"smtp_proto.ErrorResponse(501, 'missing required hostname parameter')",
+						)
+						raise
+				
 				self.assertEqual (
 					repr ( cli.helo ( 'localhost' ) ),
 					"smtp_proto.SuccessResponse(250, 'milliways.local greets localhost')",

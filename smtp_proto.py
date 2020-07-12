@@ -91,18 +91,6 @@ class IntermediateResponse ( Response ):
 class EhloResponse ( SuccessResponse ):
 	esmtp_auth: Set[str] # AUTH mechanisms get parsed and stored here
 	esmtp_features: Dict[str,str] # all other features documented here
-	
-	@property
-	def esmtp_8bitmime ( self ) -> bool:
-		return '8BITMIME' in self.esmtp_features
-	
-	@property
-	def esmtp_pipelining ( self ) -> bool:
-		return 'PIPELINING' in self.esmtp_features
-	
-	@property
-	def esmtp_starttls ( self ) -> bool:
-		return 'STARTTLS' in self.esmtp_features
 
 
 class ExpnVrfyResponse ( SuccessResponse ):
@@ -218,8 +206,8 @@ class AcceptRejectEvent ( Event ):
 
 class GreetingAcceptEvent ( AcceptRejectEvent ):
 	success_code = 220
-	error_code = 454
-	error_message = 'SMTP service not available at the moment'
+	error_code = 421
+	error_message = 'Too busy to accept mail right now'
 	
 	def __init__ ( self, server_hostname: str ) -> None:
 		self.success_message = f'{server_hostname} ESMTP'
@@ -351,7 +339,7 @@ class CompleteEvent ( AcceptRejectEvent ):
 #region REQUESTS --------------------------------------------------------------
 
 def _client_proto_send ( line: str ) -> Iterator[Event]:
-	assert line.endswith ( '\r\n' )
+	assert line.endswith ( '\r\n' ), f'invalid {line=}'
 	yield from ( event := SendDataEvent ( s2b ( line ) ) ).go()
 
 def _client_proto_recv_ok ( event: NeedDataEvent ) -> Iterator[Event]:
@@ -453,7 +441,8 @@ class GreetingRequest ( Request ):
 @request_verb ( 'HELO' )
 class HeloRequest ( Request ):
 	def __init__ ( self, domain: str ) -> None:
-		self.domain = domain
+		self.domain = str ( domain ).strip()
+		assert len ( self.domain ) > 0
 	
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'HeloRequest._client_protocol' )
@@ -481,7 +470,8 @@ class HeloRequest ( Request ):
 class EhloRequest ( Request ):
 	
 	def __init__ ( self, domain: str ) -> None:
-		self.domain = domain
+		self.domain = str ( domain ).strip()
+		assert len ( self.domain ) > 0
 	
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'EhloRequest._client_protocol' )
@@ -577,8 +567,10 @@ class _Auth ( Request ):
 	tls_required: bool = True
 	
 	def __init__ ( self, uid: str, pwd: str ) -> None:
-		self.uid = uid
-		self.pwd = pwd
+		self.uid = str ( uid )
+		self.pwd = str ( pwd )
+		assert len ( self.uid ) > 0
+		assert len ( self.pwd ) > 0
 	
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
 		assert False # not used
@@ -661,7 +653,7 @@ class AuthLoginRequest ( _Auth ):
 			yield event
 			pwd = b2s ( base64.b64decode ( event.data or b'' ) ).rstrip()
 		except Exception as e:
-			log.error ( f'{e=}' )
+			log.debug ( f'{e=}' )
 			yield ResponseEvent ( 501, 'malformed auth input RFC4616#2' )
 		else:
 			yield from self._on_authenticate ( server, uid, pwd )
@@ -673,7 +665,8 @@ class ExpnVrfyRequest ( Request ):
 	_event_cls: Type[ExpnVrfyEvent]
 	
 	def __init__ ( self, mailbox: str ) -> None:
-		self.mailbox = mailbox
+		self.mailbox = str ( mailbox ).strip()
+		assert len ( self.mailbox ) > 0
 	
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'ExpnRequest._client_protocol' )
@@ -724,7 +717,8 @@ class VrfyRequest ( ExpnVrfyRequest ):
 @request_verb ( 'MAIL' )
 class MailFromRequest ( Request ):
 	def __init__ ( self, mail_from: str ) -> None:
-		self.mail_from = mail_from
+		self.mail_from = str ( mail_from ).strip()
+		assert len ( self.mail_from ) > 0
 	
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'MailFromRequest._client_protocol' )
@@ -750,7 +744,8 @@ class MailFromRequest ( Request ):
 @request_verb ( 'RCPT' )
 class RcptToRequest ( Request ):
 	def __init__ ( self, rcpt_to: str ) -> None:
-		self.rcpt_to = rcpt_to
+		self.rcpt_to = str ( rcpt_to ).strip()
+		assert len ( self.rcpt_to ) > 0
 	
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'RcptToRequest._client_protocol' )
@@ -908,8 +903,8 @@ class Connection ( metaclass = ABCMeta ):
 	
 	def _run_protocol ( self ) -> Iterator[Event]:
 		log = logger.getChild ( 'Client._run_protocol' )
-		assert self.request is not None
-		assert self.request_protocol is not None
+		assert self.request is not None, f'invalid {self.request=}'
+		assert self.request_protocol is not None, f'invalid {self.request_protocol=}'
 		try:
 			while True:
 				#log.debug ( 'yielding to request protocol' )
@@ -955,12 +950,10 @@ class Connection ( metaclass = ABCMeta ):
 			#log.debug ( f'protocol finished with {self.request.response=}' )
 			self.request = None
 			self.request_protocol = None
-		except Event:
-			raise
 		except Exception as e:
 			self.request = None
 			self.request_protocol = None
-			log.exception ( 'internal protocol error:' )
+			#log.exception ( 'internal protocol error:' )
 			raise Closed ( repr ( e ) ) from e
 
 #endregion
@@ -1007,24 +1000,22 @@ class Server ( Connection ):
 			self.need_data.data = line
 			self.need_data = None
 			yield from self._run_protocol()
-		elif self.request is None:
+		else:
+			assert self.request is None, 'server internal state error - not waiting for data but a request is active'
 			verb, *argtext = map ( str.rstrip, b2s ( line ).split ( ' ', 1 ) ) # ex: verb='DATA', argtext=[] or verb='AUTH', argtext=['PLAIN XXXXXXXXXXXXX']
 			verb = verb.upper() # RFC5321#2.4 command verbs are not case-sensitive
 			requestcls = _request_verbs.get ( verb )
 			if requestcls is None:
 				yield ResponseEvent ( 500, 'Command not recognized' )
 				return
-			try:
-				request: Request = requestcls.__new__ ( requestcls )
-				request_protocol = request._server_protocol ( self, argtext[0] if argtext else '' )
-			except SendDataEvent as event: # this can happen if there's a problem parsing the command
-				yield event
-			else:
-				self.request = request
-				self.request_protocol = request_protocol
-				yield from self._run_protocol()
-		else:
-			assert False, 'server internal state error - not waiting for data but a request is active'
+			#try:
+			request: Request = requestcls.__new__ ( requestcls )
+			request_protocol = request._server_protocol ( self, argtext[0] if argtext else '' )
+			self.request = request
+			self.request_protocol = request_protocol
+			yield from self._run_protocol()
+			#except SendDataEvent as event: # this can happen if there's a problem parsing the command
+			#	yield event
 	
 	def reset ( self ) -> None:
 		self.mail_from = ''
@@ -1040,22 +1031,16 @@ class Client ( Connection ):
 		log = logger.getChild ( 'Client.send' )
 		assert self.request is None, f'trying to send {request=} but not finished processing {self.request=}'
 		self.request = request
-		try:
-			self.request_protocol = request._client_protocol ( self )
-		except TypeError:
-			log.error ( f'problem calling {request=}._client_protocl()' )
-			raise
+		self.request_protocol = request._client_protocol ( self )
 		#log.debug ( f'set {self.request=}' )
 		yield from self._run_protocol()
 	
 	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
 		log = logger.getChild ( 'Client._receive_line' )
 		
-		if self.need_data:
-			self.need_data.data = line
-			self.need_data = None
-			yield from self._run_protocol()
-		else:
-			raise ProtocolError ( f'not expecting data at this time ({bytes(line)!r})' )
+		assert self.need_data, f'not expecting data at this time ({bytes(line)!r})'
+		self.need_data.data = line
+		self.need_data = None
+		yield from self._run_protocol()
 
 #endregion

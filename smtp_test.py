@@ -156,6 +156,24 @@ class Tests ( unittest.TestCase ):
 				'AUTH consectetur, adipisci velit...',
 			]
 		)
+		
+		# trigger exception handle in _run_protocol:
+		srv = smtp_proto.Server ( 'localhost', False )
+		class FubarException ( Exception ):
+			pass
+		class BadRequest ( smtp_proto.RsetRequest ):
+			def _server_protocol ( self, server: smtp_proto.Server, argstext: str ) -> smtp_proto.RequestProtocolGenerator:
+				yield smtp_proto.NeedDataEvent()
+				raise FubarException ( 'boo' )
+		srv.request = BadRequest()
+		srv.request_protocol = srv.request._server_protocol ( srv, '' )
+		test.assertEqual ( list ( srv._run_protocol() ), [] ) # eat the NDE
+		with test.assertRaises ( smtp_proto.Closed ):
+			try:
+				next ( srv._run_protocol() )
+			except smtp_proto.Closed as e:
+				test.assertEqual ( repr ( e ), '''Closed("FubarException('boo')")''' )
+				raise
 
 if __name__ == '__main__':
 	logging.basicConfig ( level = logging.DEBUG )
