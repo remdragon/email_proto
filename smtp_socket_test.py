@@ -100,7 +100,7 @@ class Tests ( unittest.TestCase ):
 			except Exception:
 				log.exception ( 'Unexpected client_task exception:' )
 			finally:
-				sock.close()
+				cli._close()
 		
 		def server_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.server_task' )
@@ -153,7 +153,7 @@ class Tests ( unittest.TestCase ):
 			except Exception:
 				log.exception ( 'Unexpected server_task exception:' )
 			finally:
-				sock.close()
+				srv._close()
 		
 		thread1 = threading.Thread ( target = partial ( client_task, thing1 ), name = 'SocketClientThread' )
 		thread2 = threading.Thread ( target = partial ( server_task, thing2 ), name = 'SocketServerThread' )
@@ -225,7 +225,7 @@ class Tests ( unittest.TestCase ):
 			except Exception:
 				log.exception ( 'Unexpected client_task exception:' )
 			finally:
-				sock.close()
+				cli._close()
 		
 		def server_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.server_task' )

@@ -21,15 +21,21 @@ class Transport:
 	
 	async def _read ( self ) -> bytes:
 		#log = logger.getChild ( 'Transport._read' )
-		return await self.stream.receive_some()
+		with trio.move_on_after ( 1.0 ): # TODO FIXME: configurable timeout (this value is only for testing) and better error handling
+			return await self.stream.receive_some()
+		raise TimeoutError ( f'{type(self).__module__}.{type(self).__name__} timeout waiting to read data' )
 	
 	async def _write ( self, data: bytes ) -> None:
-		log = logger.getChild ( 'Transport._write' )
-		#log.debug ( f'{data=}' )
-		await self.stream.send_all ( data )
+		#log = logger.getChild ( 'Transport._write' )
+		with trio.move_on_after ( 1.0 ): # TODO FIXME: configurable timeout (this value is only for testing) and better error handling
+			await self.stream.send_all ( data )
+			return
+		raise TimeoutError ( f'{type(self).__module__}.{type(self).__name__} timeout waiting to write {bytes(data)=}' )
 	
 	async def _close ( self ) -> None:
-		await self.stream.aclose()
+		#log = logger.getChild ( 'Transport._close' )
+		with trio.move_on_after ( 0.05 ):
+			await self.stream.aclose() # TODO FIXME: why sometimes getting hung up when in ssl?
 
 
 class Client ( Transport, smtp_async.Client ):

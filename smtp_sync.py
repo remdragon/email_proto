@@ -180,8 +180,8 @@ class Server ( metaclass = ABCMeta ):
 			while True:
 				try:
 					data = self._read()
-				except OSError: # TODO FIXME: more specific exception?
-					raise smtp_proto.Closed()
+				except OSError as e: # TODO FIXME: more specific exception?
+					raise smtp_proto.Closed ( repr ( e ) ) from e
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
 					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
@@ -210,8 +210,8 @@ class Server ( metaclass = ABCMeta ):
 						self.on_vrfy ( event )
 					else:
 						assert False, f'unrecognized {event=}'
-		except smtp_proto.Closed:
-			pass
+		except smtp_proto.Closed as e:
+			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
 		finally:
 			self._close()
 	

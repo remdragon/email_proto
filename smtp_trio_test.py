@@ -212,7 +212,7 @@ class Tests ( unittest.TestCase ):
 				except smtp_proto.Closed as e: # pragma: no cover
 					log.debug ( f'server closed connection: {e=}' )
 				finally:
-					await stream.aclose()
+					await cli._close()
 			
 			async def server_task ( stream: trio.abc.Stream ) -> None:
 				log = logger.getChild ( 'main.server_task' )
@@ -264,7 +264,7 @@ class Tests ( unittest.TestCase ):
 				except smtp_proto.Closed:
 					pass
 				finally:
-					await stream.aclose()
+					await srv._close()
 			
 			async with trio.open_nursery() as nursery:
 				nursery.start_soon ( client_task, thing1 )

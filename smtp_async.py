@@ -77,9 +77,10 @@ class Client ( metaclass = ABCMeta ):
 			except Exception as e:
 				event.exception = e
 		elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-			log.debug ( 'calling on_starttls_begin()' )
-			await self.on_starttls_begin ( event )
-			log.debug ( 'back from on_starttls_begin()' )
+			try:
+				await self.on_starttls_begin ( event )
+			except Exception as e:
+				event.exception = e
 		else:
 			assert False, f'unrecognized {event=}'
 	
@@ -180,7 +181,7 @@ class Server ( metaclass = ABCMeta ):
 				try:
 					data = await self._read()
 				except OSError as e: # TODO FIXME: more specific exception?
-					raise smtp_proto.Closed() from e
+					raise smtp_proto.Closed ( repr ( e ) ) from e
 				log.debug ( f'C>{b2s(data).rstrip()}' )
 				for event in srv.receive ( data ):
 					if isinstance ( event, smtp_proto.SendDataEvent ): # this will be the most common event...
@@ -193,9 +194,10 @@ class Server ( metaclass = ABCMeta ):
 					elif isinstance ( event, smtp_proto.StartTlsAcceptEvent ):
 						await self.on_starttls_accept ( event )
 					elif isinstance ( event, smtp_proto.StartTlsBeginEvent ):
-						log.debug ( 'calling on_starttls_begin()' )
-						await self.on_starttls_begin ( event )
-						log.debug ( 'back from on_starttls_begin()' )
+						try:
+							await self.on_starttls_begin ( event )
+						except Exception as e:
+							event.exception = e
 					elif isinstance ( event, smtp_proto.AuthEvent ):
 						await self.on_authenticate ( event )
 					elif isinstance ( event, smtp_proto.MailFromEvent ):
@@ -208,8 +210,8 @@ class Server ( metaclass = ABCMeta ):
 						await self.on_vrfy ( event )
 					else:
 						assert False, f'unrecognized {event=}'
-		except smtp_proto.Closed:
-			pass
+		except smtp_proto.Closed as e:
+			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
 		finally:
 			await self._close()
 	

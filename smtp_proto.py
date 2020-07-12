@@ -5,6 +5,7 @@ from abc import ABCMeta, abstractmethod
 import base64
 import logging
 import re
+import traceback
 from typing import (
 	Callable, Dict, Iterable, Iterator, List, Optional as Opt, Sequence as Seq,
 	Set, Tuple, Type, TypeVar, Union,
@@ -13,8 +14,8 @@ from typing import (
 logger = logging.getLogger ( __name__ )
 
 _MAXLINE = 8192 # more than 8 times larger than RFC 821, 4.5.3
-BYTES = Union[bytes,bytearray]
-bytes_types = ( bytes, bytearray )
+BYTES = Union[bytes,bytearray,memoryview]
+bytes_types = ( bytes, bytearray, memoryview )
 ENCODING = 'us-ascii'
 ERRORS = 'strict'
 
@@ -23,10 +24,8 @@ _r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2
 _r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
 _r_crlf_dot = re.compile ( b'\\r\\n\\.', re.M )
 
-def b2s ( b: bytes ) -> str:
-	if isinstance ( b, memoryview ):
-		b = bytes ( b )
-	return b.decode ( ENCODING, ERRORS )
+def b2s ( b: BYTES ) -> str:
+	return bytes ( b ).decode ( ENCODING, ERRORS )
 
 def s2b ( s: str ) -> bytes:
 	return s.encode ( ENCODING, ERRORS )
@@ -38,7 +37,8 @@ def b64_decode ( s: str ) -> str:
 	return b2s ( base64.b64decode ( s2b ( s ) ) )
 
 class Closed ( Exception ): # TODO FIXME: BaseException?
-	pass
+	def __init__ ( self, reason: str = '' ) -> None:
+		super().__init__ ( reason or '(none given)' )
 
 class ProtocolError ( Exception ):
 	pass
@@ -249,7 +249,7 @@ class Response ( Exception ):
 	
 	@staticmethod
 	def parse ( line: Opt[bytes] ) -> Union[SuccessResponse,ErrorResponse,IntermediateResponse]:
-		assert isinstance ( line, bytes )
+		assert isinstance ( line, bytes_types )
 		try:
 			code = int ( line[:3] )
 			assert 200 <= code <= 599, f'invalid {code=}'
@@ -278,7 +278,10 @@ class NeedDataEvent ( ThrowableEvent ):
 		self.data = None
 		self.response = None
 		return self
-
+	
+	def go ( self ) -> Iterator[NeedDataEvent]:
+		self.reset()
+		yield from super().go()
 
 class SuccessResponse ( Response ):
 	pass
@@ -291,10 +294,21 @@ class IntermediateResponse ( Response ):
 
 
 class EhloResponse ( SuccessResponse ):
-	esmtp_8bitmime: bool
-	esmtp_auth: Set[str]
-	esmtp_pipelining: bool
-	esmtp_starttls: bool
+	esmtp_auth: Set[str] # AUTH mechanisms get parsed and stored here
+	esmtp_features: Dict[str,str] # all other features documented here
+	
+	@property
+	def esmtp_8bitmime ( self ) -> bool:
+		return '8BITMIME' in self.esmtp_features
+	
+	@property
+	def esmtp_pipelining ( self ) -> bool:
+		return 'PIPELINING' in self.esmtp_features
+	
+	@property
+	def esmtp_starttls ( self ) -> bool:
+		return 'STARTTLS' in self.esmtp_features
+
 
 class ExpnVrfyResponse ( SuccessResponse ):
 	pass
@@ -387,15 +401,6 @@ class Request ( metaclass = ABCMeta ):
 
 
 class GreetingRequest ( Request ):
-	def __init__ ( self ) -> None:
-		pass
-	
-	def send_data ( self ) -> Iterator[SendDataEvent]:
-		yield from ()
-	
-	def on_success ( self, client: Client, response: Response ) -> Iterator[Event]:
-		yield from ()
-	
 	def _client_protocol ( self, client: Client ) -> Iterator[Event]:
 		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
 		yield from _client_proto_recv_done()
@@ -435,10 +440,8 @@ class EhloRequest ( Request ):
 		event = NeedDataEvent()
 		lines: List[str] = []
 		
-		esmtp_8bitmime: bool = False
+		esmtp_features: Dict[str,str] = {}
 		esmtp_auth: Set[str] = set()
-		esmtp_pipelining: bool = False
-		esmtp_starttls: bool = False
 		
 		while True:
 			yield from _client_proto_recv_ok ( event )
@@ -449,21 +452,16 @@ class EhloRequest ( Request ):
 			
 			# TODO FIXME: some kind of plugin system so this is not hard-coded maybe?
 			log.debug ( f'{line=}' )
-			if line.startswith ( '8BITMIME' ):
-				esmtp_8bitmime = True
-			elif line.startswith ( 'AUTH ' ):
+			if line.startswith ( 'AUTH ' ):
 				for auth in line.split ( ' ' )[1:]:
 					esmtp_auth.add ( auth )
-			elif line.startswith ( 'PIPELINING' ):
-				esmtp_pipelining = True
-			elif line.startswith ( 'STARTTLS' ):
-				esmtp_starttls = True
+			else:
+				name, *args = line.split ( ' ', 1 )
+				esmtp_features[name] = args[0] if args else ''
 			if isinstance ( tmp, SuccessResponse ):
 				r = EhloResponse ( tmp.code, *lines )
-				r.esmtp_8bitmime = esmtp_8bitmime
+				r.esmtp_features = esmtp_features
 				r.esmtp_auth = esmtp_auth
-				r.esmtp_pipelining = esmtp_pipelining
-				r.esmtp_starttls = esmtp_starttls
 				raise r
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
@@ -529,7 +527,7 @@ class _Auth ( Request ):
 		if server.auth_mailbox:
 			raise ResponseEvent ( 503, 'already authenticated (RFC4954#4 Restrictions)' )
 		mechanism, *moreargtext = argtext.split ( ' ', 1 ) # ex: mechanism='PLAIN' moreargtext=['FUBAR']
-		log.debug ( f'{mechanism=} {moreargtext=}' )
+		#log.debug ( f'{mechanism=} {moreargtext=}' )
 		plugincls = _auth_plugins.get ( mechanism )
 		if plugincls is None:
 			raise ResponseEvent ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
@@ -730,7 +728,6 @@ class DataRequest ( Request ):
 		for m in _r_crlf_dot.finditer ( payload ):
 			start = m.start()
 			chunk = payload[last:start]
-			#log.debug ( f'{last=} {start=} {chunk=} {stitch=}' )
 			parts.append ( chunk )
 			parts.append ( stitch )
 			last = start + 3
@@ -738,11 +735,11 @@ class DataRequest ( Request ):
 			parts.append ( payload[last:] )
 		if not self.payload.endswith ( b'\r\n' ):
 			parts.append ( b'\r\n' )
-		log.debug ( f'{parts=}' )
 		yield from SendDataEvent ( *parts ).go()
 		yield from _client_proto_send_recv_done ( '.\r\n' )
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> Iterator[Event]:
+		#log = logger.getChild ( 'DataRequest._server_protocol' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
 		if argtext and server.pedantic:
@@ -760,7 +757,7 @@ class DataRequest ( Request ):
 			line = event1.data or b''
 			if line == b'.\r\n':
 				break
-			elif line.startswith ( b'.' ):
+			elif line[0:1] == b'.':
 				server.data.append ( line[1:] )
 			else:
 				server.data.append ( line )
@@ -829,17 +826,15 @@ class Connection ( metaclass = ABCMeta ):
 			raise Closed()
 		self._buf += data
 		start = 0
-		while ( end := ( self._buf.find ( b'\n', start ) + 1 ) ):
-			line = self._buf[start:end]
-			try:
+		end = 0
+		try:
+			while ( end := ( self._buf.find ( b'\n', start ) + 1 ) ):
+				line = memoryview ( self._buf )[start:end]
+				start = end
 				yield from self._receive_line ( line )
-			except:
-				# we normally wait until done yielding all events, but exceptions abort our loop, so clean up now:
-				self._buf = self._buf[end:]
-				raise
-			start = end
-		if start:
-			self._buf = self._buf[start:]
+		finally:
+			if start:
+				self._buf = self._buf[start:]
 		if len ( self._buf ) >= _MAXLINE:
 			raise ProtocolError ( 'maximum line length exceeded' )
 	
@@ -895,6 +890,13 @@ class Connection ( metaclass = ABCMeta ):
 			#log.debug ( f'protocol finished with {self.request.response=}' )
 			self.request = None
 			self.request_protocol = None
+		except Event:
+			raise
+		except Exception as e:
+			self.request = None
+			self.request_protocol = None
+			log.exception ( 'internal protocol error:' )
+			raise Closed ( repr ( e ) ) from e
 
 #endregion
 #region SERVER ----------------------------------------------------------------
@@ -939,7 +941,7 @@ class Server ( Connection ):
 		#	(this is a useful state if remote ip is untrusted via blacklisting/whitelisting )
 		return s2b ( f'220 {self.hostname} ESMTP\r\n' )
 	
-	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
+	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
 		#log = logger.getChild ( 'Server._receive_line' )
 		if self.need_data:
 			self.need_data.data = line
@@ -986,7 +988,7 @@ class Client ( Connection ):
 		#log.debug ( f'set {self.request=}' )
 		yield from self._run_protocol()
 	
-	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
+	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
 		log = logger.getChild ( 'Client._receive_line' )
 		
 		if self.need_data:
@@ -994,6 +996,6 @@ class Client ( Connection ):
 			self.need_data = None
 			yield from self._run_protocol()
 		else:
-			raise ProtocolError ( f'not expecting data at this time ({line!r})' )
+			raise ProtocolError ( f'not expecting data at this time ({bytes(line)!r})' )
 
 #endregion

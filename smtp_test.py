@@ -65,6 +65,22 @@ class Tests ( unittest.TestCase ):
 		with self.assertRaises ( smtp_proto.ProtocolError ):
 			evts = list ( conn.receive ( b'X' * smtp_proto._MAXLINE ) )
 		
+		self.assertEqual (
+			repr ( smtp_proto.GreetingRequest() ),
+			'smtp_proto.GreetingRequest()',
+		)
+		
+		with self.assertRaises ( smtp_proto.Closed ):
+			try:
+				smtp_proto.Response.parse ( b'999 INVALID\r\n' )
+			except smtp_proto.Closed as e:
+				self.assertEqual ( e.args[0],
+					"malformed response from server"
+					" line=b'999 INVALID\\r\\n':"
+					" e=AssertionError('invalid code=999')"
+				)
+				raise
+		
 		if False: # the following test may no longer be valid due to client proto refactor
 			cli = smtp_proto.Client()
 			with self.assertRaises ( smtp_proto.Closed ):
