@@ -35,12 +35,18 @@ class Tests ( unittest.TestCase ):
 					r = await cli.ehlo ( 'localhost' )
 					test.assertEqual ( type ( r ), smtp_proto.EhloResponse )
 					test.assertEqual ( r.code, 250 )
-					test.assertEqual ( sorted ( r.lines ), [
+					test.assertEqual ( r.lines[0],
+						'milliways.local greets localhost',
+					)
+					test.assertEqual ( sorted ( r.esmtp_auth ), [
+						# TODO FIXME WARNING: we are *pretending* to be in ssl in this test
+						'LOGIN',
+						'PLAIN',
+					] )
+					test.assertEqual ( sorted ( r.esmtp_features ), [
 						'8BITMIME',
-						'AUTH PLAIN LOGIN', # TODO FIXME WARNING: we are *pretending* to be in ssl in this test
 						'PIPELINING',
 						#'STARTTLS', # not available because smtp_proto thinks we're already encrypted
-						'milliways.local greets localhost',
 					] )
 					
 					test.assertEqual (

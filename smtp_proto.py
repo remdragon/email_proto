@@ -45,6 +45,76 @@ class ProtocolError ( Exception ):
 	pass
 
 #endregion
+#region RESPONSES -------------------------------------------------------------
+
+ResponseType = TypeVar ( 'ResponseType', bound = 'Response' )
+class Response ( Exception ):
+	def __init__ ( self, code: int, *lines: str ) -> None:
+		self.code = code
+		assert lines and all ( isinstance ( line, str ) for line in lines ), f'invalid {lines=}'
+		self.lines = lines
+		super().__init__ ( code, *lines )
+	
+	@staticmethod
+	def parse ( line: Opt[bytes] ) -> Union[SuccessResponse,ErrorResponse,IntermediateResponse]:
+		assert isinstance ( line, bytes_types )
+		try:
+			code = int ( line[:3] )
+			assert 200 <= code <= 599, f'invalid {code=}'
+			intermediate = line[3:4]
+			text = b2s ( line[4:] ).rstrip()
+			assert intermediate in ( b' ', b'-' )
+		except Exception as e:
+			raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
+		if intermediate == b'-':
+			return IntermediateResponse ( code, text )
+		if code < 400:
+			return SuccessResponse ( code, text )
+		else:
+			return ErrorResponse ( code, text )
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}({self.code!r}, {", ".join(map(repr,self.lines))})'
+
+
+class SuccessResponse ( Response ):
+	pass
+
+class ErrorResponse ( Response ):
+	pass
+
+class IntermediateResponse ( Response ):
+	pass
+
+
+class EhloResponse ( SuccessResponse ):
+	esmtp_auth: Set[str] # AUTH mechanisms get parsed and stored here
+	esmtp_features: Dict[str,str] # all other features documented here
+	
+	@property
+	def esmtp_8bitmime ( self ) -> bool:
+		return '8BITMIME' in self.esmtp_features
+	
+	@property
+	def esmtp_pipelining ( self ) -> bool:
+		return 'PIPELINING' in self.esmtp_features
+	
+	@property
+	def esmtp_starttls ( self ) -> bool:
+		return 'STARTTLS' in self.esmtp_features
+
+
+class ExpnVrfyResponse ( SuccessResponse ):
+	pass
+
+class ExpnResponse ( ExpnVrfyResponse ):
+	pass
+
+class VrfyResponse ( ExpnVrfyResponse ):
+	pass
+
+#endregion
 #region EVENTS ----------------------------------------------------------------
 
 class Event ( Exception ):
@@ -57,6 +127,21 @@ class Event ( Exception ):
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}()'
 
+
+class NeedDataEvent ( Event ):
+	data: Opt[bytes] = None
+	response: Opt[Response] = None
+	
+	def reset ( self ) -> NeedDataEvent:
+		self.data = None
+		self.response = None
+		return self
+	
+	def go ( self ) -> Iterator[Event]:
+		self.reset()
+		yield from super().go()
+
+
 class SendDataEvent ( Event ):
 	
 	def __init__ ( self, *chunks: bytes ) -> None:
@@ -65,6 +150,7 @@ class SendDataEvent ( Event ):
 	def __repr__ ( self ) -> str:
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}(chunks={self.chunks!r})'
+
 
 class ResponseEvent ( SendDataEvent ):
 	def __init__ ( self, code: int, *lines: str ) -> None:
@@ -251,88 +337,6 @@ class CompleteEvent ( AcceptRejectEvent ):
 	
 	# TODO FIXME: define custom reject_* methods for specific scenarios
 
-#endregion
-#region RESPONSES -------------------------------------------------------------
-
-ResponseType = TypeVar ( 'ResponseType', bound = 'Response' )
-class Response ( Exception ):
-	def __init__ ( self, code: int, *lines: str ) -> None:
-		self.code = code
-		assert lines and isinstance ( lines[0], str ) # they should all be str but I'm being lazy here
-		self.lines = lines
-		super().__init__ ( code, *lines )
-	
-	@staticmethod
-	def parse ( line: Opt[bytes] ) -> Union[SuccessResponse,ErrorResponse,IntermediateResponse]:
-		assert isinstance ( line, bytes_types )
-		try:
-			code = int ( line[:3] )
-			assert 200 <= code <= 599, f'invalid {code=}'
-			intermediate = line[3:4]
-			text = b2s ( line[4:] ).rstrip()
-			assert intermediate in ( b' ', b'-' )
-		except Exception as e:
-			raise Closed ( f'malformed response from server {line=}: {e=}' ) from e
-		if intermediate == b'-':
-			return IntermediateResponse ( code, text )
-		if code < 400:
-			return SuccessResponse ( code, text )
-		else:
-			return ErrorResponse ( code, text )
-	
-	def __repr__ ( self ) -> str:
-		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}({self.code!r}, {", ".join(map(repr,self.lines))})'
-
-
-class NeedDataEvent ( Event ):
-	data: Opt[bytes] = None
-	response: Opt[Response] = None
-	
-	def reset ( self ) -> NeedDataEvent:
-		self.data = None
-		self.response = None
-		return self
-	
-	def go ( self ) -> Iterator[Event]:
-		self.reset()
-		yield from super().go()
-
-class SuccessResponse ( Response ):
-	pass
-
-class ErrorResponse ( Response ):
-	pass
-
-class IntermediateResponse ( Response ):
-	pass
-
-
-class EhloResponse ( SuccessResponse ):
-	esmtp_auth: Set[str] # AUTH mechanisms get parsed and stored here
-	esmtp_features: Dict[str,str] # all other features documented here
-	
-	@property
-	def esmtp_8bitmime ( self ) -> bool:
-		return '8BITMIME' in self.esmtp_features
-	
-	@property
-	def esmtp_pipelining ( self ) -> bool:
-		return 'PIPELINING' in self.esmtp_features
-	
-	@property
-	def esmtp_starttls ( self ) -> bool:
-		return 'STARTTLS' in self.esmtp_features
-
-
-class ExpnVrfyResponse ( SuccessResponse ):
-	pass
-
-class ExpnResponse ( ExpnVrfyResponse ):
-	pass
-
-class VrfyResponse ( ExpnVrfyResponse ):
-	pass
 
 #endregion
 #region REQUESTS --------------------------------------------------------------
@@ -472,16 +476,16 @@ class EhloRequest ( Request ):
 			yield from _client_proto_recv_ok ( event )
 			tmp: Opt[Response] = event.response
 			assert tmp is not None
-			line = tmp.lines[0]
-			lines.append ( line )
-			
-			if line.startswith ( 'AUTH ' ):
-				for auth in line.split ( ' ' )[1:]:
-					esmtp_auth.add ( auth )
-			else:
-				name, *args = line.split ( ' ', 1 )
-				esmtp_features[name] = args[0] if args else ''
+			lines.append ( tmp.lines[0] )
 			if isinstance ( tmp, SuccessResponse ):
+				for line in lines[1:]:
+					
+					if line.startswith ( 'AUTH ' ):
+						for auth in line.split ( ' ' )[1:]:
+							esmtp_auth.add ( auth )
+					else:
+						name, *args = line.split ( ' ', 1 )
+						esmtp_features[name] = args[0] if args else ''
 				r = EhloResponse ( tmp.code, *lines )
 				r.esmtp_features = esmtp_features
 				r.esmtp_auth = esmtp_auth
