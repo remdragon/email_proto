@@ -1,6 +1,7 @@
 #region PROLOGUE --------------------------------------------------------------
 from __future__ import annotations
 
+# python imports:
 from abc import ABCMeta, abstractmethod
 import base64
 import logging
@@ -12,30 +13,17 @@ from typing import (
 	Sequence as Seq, Set, Tuple, Type, TypeVar, Union,
 )
 
+# email_proto imports:
+from util import bytes_types, BYTES, b2s, s2b, b64_encode_str, b64_decode_str
+
 logger = logging.getLogger ( __name__ )
 
 _MAXLINE = 8192 # more than 8 times larger than RFC 821, 4.5.3
-BYTES = Union[bytes,bytearray,memoryview]
-bytes_types = ( bytes, bytearray, memoryview )
-ENCODING = 'us-ascii'
-ERRORS = 'strict'
 
 _r_eol = re.compile ( r'[\r\n]' )
 _r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
 _r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
 _r_crlf_dot = re.compile ( b'\\r\\n\\.', re.M )
-
-def b2s ( b: BYTES ) -> str:
-	return bytes ( b ).decode ( ENCODING, ERRORS )
-
-def s2b ( s: str ) -> bytes:
-	return s.encode ( ENCODING, ERRORS )
-
-def b64_encode ( s: str ) -> str:
-	return b2s ( base64.b64encode ( s2b ( s ) ) )
-
-def b64_decode ( s: str ) -> str:
-	return b2s ( base64.b64decode ( s2b ( s ) ) )
 
 class Closed ( Exception ): # TODO FIXME: BaseException?
 	def __init__ ( self, reason: str = '' ) -> None:
@@ -611,7 +599,7 @@ class AuthPlainRequest ( _Auth ):
 				yield ResponseEvent ( 334, '' )
 				yield from ( event := NeedDataEvent() ).go()
 				authtext = b2s ( event.data or b'' ).rstrip()
-			_, uid, pwd = b64_decode ( authtext ).split ( '\0' )
+			_, uid, pwd = b64_decode_str ( authtext ).split ( '\0' )
 		except Exception as e:
 			log.debug ( f'malformed auth input {moreargtext=}: {e=}' )
 			yield ResponseEvent ( 501, 'malformed auth input RFC4616#2' )
@@ -622,14 +610,14 @@ class AuthPlainRequest ( _Auth ):
 class AuthPlain1Request ( AuthPlainRequest ):
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'AuthPlain1Request._client_protocol' )
-		authtext = b64_encode ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
+		authtext = b64_encode_str ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
 		yield from _client_proto_send_recv_done ( f'AUTH PLAIN {authtext}\r\n' )
 
 class AuthPlain2Request ( AuthPlainRequest ):
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'AuthPlain2Request._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'AUTH PLAIN\r\n' )
-		authtext = b64_encode ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
+		authtext = b64_encode_str ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
 		yield from _client_proto_send_recv_done ( f'{authtext}\r\n' )
 
 
@@ -639,8 +627,8 @@ class AuthLoginRequest ( _Auth ):
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'AuthLoginRequest._client_protocol' )
 		yield from _client_proto_send_recv_ok ( 'AUTH LOGIN\r\n' )
-		yield from _client_proto_send_recv_ok ( f'{b64_encode(self.uid)}\r\n' )
-		yield from _client_proto_send_recv_done ( f'{b64_encode(self.pwd)}\r\n' )
+		yield from _client_proto_send_recv_ok ( f'{b64_encode_str(self.uid)}\r\n' )
+		yield from _client_proto_send_recv_done ( f'{b64_encode_str(self.pwd)}\r\n' )
 	
 	def _server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'AuthLoginRequest._server_protocol' )
@@ -648,10 +636,10 @@ class AuthLoginRequest ( _Auth ):
 			raise ResponseEvent ( 501, 'Syntax error (no extra parameters allowed)' )
 		event = NeedDataEvent()
 		try:
-			yield ResponseEvent ( 334, b64_encode ( 'Username:' ) )
+			yield ResponseEvent ( 334, b64_encode_str ( 'Username:' ) )
 			yield event
 			uid = b2s ( base64.b64decode ( event.data or b'' ) ).rstrip()
-			yield ResponseEvent ( 334, b64_encode ( 'Password:' ) )
+			yield ResponseEvent ( 334, b64_encode_str ( 'Password:' ) )
 			yield event
 			pwd = b2s ( base64.b64decode ( event.data or b'' ) ).rstrip()
 		except Exception as e:

@@ -11,10 +11,9 @@ import unittest
 import itrustme
 import smtp_proto
 import smtp_trio
+from util import b2s
 
 logger = logging.getLogger ( __name__ )
-
-b2s = smtp_proto.b2s
 
 trust = itrustme.ServerOnly (
 	server_hostname = 'milliways.local',

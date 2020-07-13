@@ -8,10 +8,10 @@ import unittest
 # mail_proto imports:
 import smtp_proto
 import smtp_aio
+from util import b2s
 
 logger = logging.getLogger ( __name__ )
 
-b2s = smtp_proto.b2s
 
 class Tests ( unittest.TestCase ):
 	def test_auth_plain1 ( self ) -> None:

@@ -11,10 +11,9 @@ import unittest
 import itrustme
 import smtp_proto
 import smtp_socket
+from util import b2s
 
 logger = logging.getLogger ( __name__ )
-
-b2s = smtp_proto.b2s
 
 if False:
 	trust = itrustme.ClientServer (

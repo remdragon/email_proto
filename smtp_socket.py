@@ -10,10 +10,9 @@ from typing import Optional as Opt
 # mail_proto imports:
 import smtp_proto
 import smtp_sync
+from util import b2s
 
 logger = logging.getLogger ( __name__ )
-
-b2s = smtp_proto.b2s
 
 
 class Transport:

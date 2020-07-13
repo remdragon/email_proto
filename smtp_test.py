@@ -24,8 +24,8 @@ class Tests ( unittest.TestCase ):
 		log = logger.getChild ( 'Tests.test_misc' )
 		test = self
 		
-		test.assertEqual ( smtp_proto.b64_encode ( 'Hello' ), 'SGVsbG8=' )
-		test.assertEqual ( smtp_proto.b64_decode ( 'SGVsbG8=' ), 'Hello' )
+		test.assertEqual ( smtp_proto.b64_encode_str ( 'Hello' ), 'SGVsbG8=' )
+		test.assertEqual ( smtp_proto.b64_decode_str ( 'SGVsbG8=' ), 'Hello' )
 		
 		evt = smtp_proto.SendDataEvent ( b'foo' )
 		test.assertEqual ( repr ( evt ), "smtp_proto.SendDataEvent(chunks=(b'foo',))" )

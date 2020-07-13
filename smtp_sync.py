@@ -5,10 +5,10 @@ import sys
 
 # email_proto imports:
 import smtp_proto
+from util import b2s
 
 logger = logging.getLogger ( __name__ )
 
-b2s = smtp_proto.b2s
 
 class Client ( metaclass = ABCMeta ):
 	cli: smtp_proto.Client
