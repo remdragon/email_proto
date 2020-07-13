@@ -157,23 +157,50 @@ class Tests ( unittest.TestCase ):
 			]
 		)
 		
-		# trigger exception handle in _run_protocol:
+		# trigger exception handler in _run_protocol:
 		srv = smtp_proto.Server ( 'localhost', False )
 		class FubarException ( Exception ):
 			pass
 		class BadRequest ( smtp_proto.RsetRequest ):
+			def _client_protocol ( self, client: smtp_proto.Client ) -> smtp_proto.RequestProtocolGenerator:
+				yield from () # this is bad/wrong, client should always raise the result, this will trigger critical error logger
 			def _server_protocol ( self, server: smtp_proto.Server, argstext: str ) -> smtp_proto.RequestProtocolGenerator:
+				self.response = smtp_proto.ResponseEvent ( 500, 'Error' ) # also trigger critical error logging
 				yield smtp_proto.NeedDataEvent()
 				raise FubarException ( 'boo' )
 		srv.request = BadRequest()
 		srv.request_protocol = srv.request._server_protocol ( srv, '' )
-		test.assertEqual ( list ( srv._run_protocol() ), [] ) # eat the NDE
+		with quiet_logging(): # don't want to hear about the critcal error
+			test.assertEqual ( list ( srv._run_protocol() ), [] ) # eat the NDE
 		with test.assertRaises ( smtp_proto.Closed ):
 			try:
-				next ( srv._run_protocol() )
+				with quiet_logging(): # don't want to hear about this error either
+					next ( srv._run_protocol() )
 			except smtp_proto.Closed as e:
 				test.assertEqual ( repr ( e ), '''Closed("FubarException('boo')")''' )
 				raise
+		
+		class NotImplementedRequest ( smtp_proto.Request ):
+			def _client_protocol ( self, client: smtp_proto.Client ) -> smtp_proto.RequestProtocolGenerator:
+				return super()._client_protocol ( client )
+			def _server_protocol ( self, server: smtp_proto.Server, argtext: str ) -> smtp_proto.RequestProtocolGenerator:
+				return super()._server_protocol ( server, argtext )
+		
+		nir = NotImplementedRequest()
+		with self.assertRaises ( NotImplementedError ):
+			nir._client_protocol ( None ) # type: ignore
+		with self.assertRaises ( NotImplementedError ):
+			nir._server_protocol ( None, '' ) # type: ignore
+		
+		_auth = smtp_proto._Auth ( 'foo', 'bar' )
+		with self.assertRaises ( NotImplementedError ):
+			_auth._client_protocol ( None ) # type: ignore
+		
+		cli = smtp_proto.Client ( False )
+		cli.request = BadRequest()
+		cli.request_protocol = cli.request._client_protocol ( cli )
+		with quiet_logging():
+			list ( cli._run_protocol() )
 
 if __name__ == '__main__':
 	logging.basicConfig ( level = logging.DEBUG )

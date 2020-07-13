@@ -211,6 +211,7 @@ class GreetingAcceptEvent ( AcceptRejectEvent ):
 	
 	def __init__ ( self, server_hostname: str ) -> None:
 		self.success_message = f'{server_hostname} ESMTP'
+		super().__init__()
 
 
 class HeloAcceptEvent ( AcceptRejectEvent ):
@@ -266,6 +267,7 @@ class ExpnVrfyEvent ( AcceptRejectEvent ):
 	
 	def __init__ ( self, mailbox: str ) -> None:
 		self.mailbox = mailbox
+		super().__init__()
 	
 	def accept ( self, *mailboxes: str ) -> None:
 		self._code = self.success_code
@@ -393,14 +395,13 @@ def auth_plugin ( name: str ) -> Callable[[Type[_Auth]],Type[_Auth]]:
 RequestProtocolGenerator = Generator[Event,None,None]
 
 class Request ( metaclass = ABCMeta ):
-	# TODO FIXME: this will become the basis of all client/server command handling
-	# maybe rename to Command?
-	# 1) client will use __init__() to construct request
-	# 2) server will use @classmethod parse ( line: bytes ) to construct request ( experiment with calling __new__() directly to bypass client's __init__ )
-	# 3) client-specific API that Client class will use to control status of multi-line interaction
-	# 4) server-specific API that Server class will use for the same
-	# AuthPlugin() should be able to inherit from this
-	# users will be able to create their own custom Request/Command objects
+	# this class is the basis of all client/server command handling
+	# 1) client uses __init__() to construct request
+	# 2) server bypasses __init__() for technical reasons
+	# 3) _client_protocol() implements client-side state machine
+	# 4) _server_protocol() implements server-side state machine
+	# see _Auth class for AUTH plugins
+	# users are be able to create their own custom Request objects
 	response: Opt[Response] = None
 	
 	def __repr__ ( self ) -> str:
@@ -408,12 +409,12 @@ class Request ( metaclass = ABCMeta ):
 		return f'{cls.__module__}.{cls.__name__}()'
 	
 	@abstractmethod
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._client_protocol()' )
 	
 	@abstractmethod
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # pragma: no cover
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._server_protocol()' )
 
@@ -423,7 +424,7 @@ class GreetingRequest ( Request ):
 		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
 		yield from _client_proto_recv_done()
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # pragma: no cover
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		# if too busy, can also return:
 		#	421-{self.hostname} is too busy to accept mail right now.
 		#	421 Please come back in {delay} seconds.
@@ -553,7 +554,9 @@ class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure S
 		yield from ( event1 := StartTlsAcceptEvent() ).go()
 		yield ResponseEvent ( event1._code, event1._message )
 		yield from StartTlsBeginEvent().go()
+		
 		server.tls = True
+		# TODO FIXME: server.reset()?
 		
 		event = GreetingAcceptEvent ( server.hostname )
 		yield from event.go()
@@ -572,8 +575,8 @@ class _Auth ( Request ):
 		assert len ( self.uid ) > 0
 		assert len ( self.pwd ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
-		assert False # not used
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		return super()._client_protocol ( client ) # not used
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( '_Auth._server_protocol' )
@@ -599,8 +602,7 @@ class _Auth ( Request ):
 
 @auth_plugin ( 'PLAIN' )
 class AuthPlainRequest ( _Auth ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator: # pragma: no cover
-		assert False # use AuthPlain1Request or AuthPlain2Request below
+	# no _client_protocol - clients should use AuthPlain1Request or AuthPlain2Request
 	
 	def _server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'AuthPlainRequest._server_protocol' )
@@ -905,14 +907,15 @@ class Connection ( metaclass = ABCMeta ):
 		log = logger.getChild ( 'Client._run_protocol' )
 		assert self.request is not None, f'invalid {self.request=}'
 		assert self.request_protocol is not None, f'invalid {self.request_protocol=}'
+		log.debug ( 'starting' )
 		try:
 			while True:
-				#log.debug ( 'yielding to request protocol' )
+				log.debug ( 'yielding to request protocol' )
 				event = next ( self.request_protocol )
-				#log.debug ( f'{event=}' )
+				log.debug ( f'{event=}' )
 				if isinstance ( event, NeedDataEvent ):
-					if self.request.response is not None: # pragma: no cover
-						log.warning ( f'INTERNAL ERROR - {self.request!r} pushed NeedDataEvent but has a response set - this can cause upstack deadlock ({self.request.response!r})' )
+					if self.request.response is not None:
+						log.critical ( f'INTERNAL ERROR - {self.request!r} pushed NeedDataEvent but has a response set - this can cause upstack deadlock ({self.request.response!r})' )
 						self.request.response = None
 					self.need_data = event.reset()
 					return
@@ -940,8 +943,8 @@ class Connection ( metaclass = ABCMeta ):
 		except StopIteration:
 			# client protocol *must* raise a ResponseEvent *or* set it's response attribute before exiting
 			# if not, the smtp_[a]sync.Client._recv() will get stuck waiting for data that never arrives
-			if not self.request.response and isinstance ( self, Client ): # pragma: no cover
-				log.warning (
+			if not self.request.response and isinstance ( self, Client ):
+				log.critical (
 					f'INTERNAL ERROR:'
 					f' {type(self.request).__module__}.{type(self.request).__name__}'
 					f'._client_protocol() exit w/o response - this can cause upstack deadlock'
@@ -953,7 +956,7 @@ class Connection ( metaclass = ABCMeta ):
 		except Exception as e:
 			self.request = None
 			self.request_protocol = None
-			#log.exception ( 'internal protocol error:' )
+			log.exception ( 'internal protocol error:' )
 			raise Closed ( repr ( e ) ) from e
 
 #endregion
@@ -964,7 +967,7 @@ def _auth_lines ( auth_mechanisms: Iterable[str] ) -> Seq[str]:
 	if auth_mechanisms:
 		line = ' '.join ( auth_mechanisms )
 		while len ( line ) >= 71: # 80 - len ( '250-' ) - len ( 'AUTH ' )
-			n = line.rindex ( ' ', 0, 71 ) # raises: ValueError # no auth name can be 71 characters! ( what is the limit? )
+			n = line.rindex ( ' ', 0, 71 ) # raises: ValueError # no auth name can be 71 characters! ( not true, one of the RFCs greatly extended command length limits )
 			lines.append ( f'AUTH {line[:n]}' )
 			line = line[n:].lstrip()
 		lines.append ( f'AUTH {line}' )
