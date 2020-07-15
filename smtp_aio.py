@@ -8,13 +8,13 @@ import ssl
 from typing import Optional as Opt
 
 # mail_proto imports:
-import smtp_proto
+import smtp_proto as proto
 import smtp_async
 
 logger = logging.getLogger ( __name__ )
 
 
-class Transport:
+class AsyncioTransport:
 	rx: asyncio.StreamReader
 	tx: asyncio.StreamWriter
 	
@@ -46,7 +46,7 @@ class Transport:
 		await self.tx.wait_closed()
 
 
-class Client ( Transport, smtp_async.Client ):
+class Client ( AsyncioTransport, smtp_async.Client ):
 	server_hostname: Opt[str] = None
 	ssl_context: Opt[ssl.SSLContext] = None
 	
@@ -57,7 +57,7 @@ class Client ( Transport, smtp_async.Client ):
 		)
 		await self._connect ( tls )
 	
-	async def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+	async def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None:
 		#log = logger.getChild ( 'Client.on_StartTlsBeginEvent' )
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context ( ssl.Purpose.SERVER_AUTH )
@@ -72,7 +72,7 @@ class Client ( Transport, smtp_async.Client ):
 		setattr ( self.tx, '_transport', transport )
 
 
-class Server ( Transport, smtp_async.Server ):
+class Server ( AsyncioTransport, smtp_async.Server ):
 	ssl_context: Opt[ssl.SSLContext] = None
 	
 	async def run ( self,
@@ -84,7 +84,7 @@ class Server ( Transport, smtp_async.Server ):
 		self.tx = tx
 		await self._run ( tls )
 	
-	async def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+	async def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None:
 		#log = logger.getChild ( 'Server.on_StartTlsBeginEvent' )
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context()

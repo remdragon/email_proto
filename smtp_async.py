@@ -1,16 +1,17 @@
 # system imports:
-from abc import ABCMeta, abstractmethod
+from abc import abstractmethod
 import logging
 import sys
 
 # email_proto imports:
 import smtp_proto as proto
+from transports import AsyncTransport
 from util import b2s
 
 logger = logging.getLogger ( __name__ )
 
 
-class Client ( metaclass = ABCMeta ):
+class Client ( AsyncTransport ):
 	cli: proto.Client
 	
 	async def _connect ( self, tls: bool ) -> proto.SuccessResponse:
@@ -74,14 +75,6 @@ class Client ( metaclass = ABCMeta ):
 			log.debug ( f'S>{b2s(chunk).rstrip()}' )
 			await self._write ( chunk )
 	
-	async def _on_event ( self, event: proto.Event ) -> None:
-		log = logger.getChild ( 'Client._on_event' )
-		try:
-			func = getattr ( self, f'on_{type(event).__name__}' )
-			await func ( event )
-		except Exception:
-			event.exc_info = sys.exc_info()
-	
 	async def _recv ( self, request: proto.Request ) -> proto.SuccessResponse:
 		log = logger.getChild ( 'Client._recv' )
 		while not request.response:
@@ -99,27 +92,12 @@ class Client ( metaclass = ABCMeta ):
 		return await self._recv ( request )
 	
 	@abstractmethod
-	async def _read ( self ) -> bytes:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._read()' )
-	
-	@abstractmethod
-	async def _write ( self, data: bytes ) -> None:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._write()' )
-	
-	@abstractmethod
-	async def close ( self ) -> None:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
-	
-	@abstractmethod
 	async def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None: # pragma: no cover
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsBeginEvent()' )
 
 
-class Server ( metaclass = ABCMeta ):
+class Server ( AsyncTransport ):
 	
 	def __init__ ( self, hostname: str ) -> None:
 		self.hostname = hostname
@@ -178,14 +156,6 @@ class Server ( metaclass = ABCMeta ):
 			log.debug ( f'S>{b2s(chunk).rstrip()}' )
 			await self._write ( chunk )
 	
-	async def _on_event ( self, event: proto.Event ) -> None:
-		log = logger.getChild ( 'Server._on_event' )
-		try:
-			func = getattr ( self, f'on_{type(event).__name__}' )
-			await func ( event )
-		except Exception:
-			event.exc_info = sys.exc_info()
-	
 	async def _run ( self, tls: bool ) -> None:
 		log = logger.getChild ( 'Server._run' )
 		try:
@@ -206,18 +176,3 @@ class Server ( metaclass = ABCMeta ):
 			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
 		finally:
 			await self.close()
-	
-	@abstractmethod
-	async def _read ( self ) -> bytes:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}()' )
-	
-	@abstractmethod
-	async def _write ( self, data: bytes ) -> None:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}()' )
-	
-	@abstractmethod
-	async def close ( self ) -> None:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )

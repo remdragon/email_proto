@@ -11,6 +11,7 @@ logger = logging.getLogger ( __name__ )
 
 T = TypeVar ( 'T' )
 
+
 class Transport ( metaclass = ABCMeta ):
 	@abstractmethod
 	async def _read ( self ) -> bytes:
@@ -27,6 +28,7 @@ class Transport ( metaclass = ABCMeta ):
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.close()' )
 
+
 class SyncTransport ( Generic[T] ):
 	def _on_event ( self, event: T ) -> None:
 		log = logger.getChild ( 'SyncTransport._on_event' )
@@ -35,6 +37,7 @@ class SyncTransport ( Generic[T] ):
 			func ( event )
 		except Exception:
 			event.exc_info = sys.exc_info()
+
 
 class AsyncTransport ( Generic[T] ):
 	async def _on_event ( self, event: T ) -> None:

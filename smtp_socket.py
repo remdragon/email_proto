@@ -8,14 +8,14 @@ import ssl
 from typing import Optional as Opt
 
 # mail_proto imports:
-import smtp_proto
+import smtp_proto as proto
 import smtp_sync
 from util import b2s
 
 logger = logging.getLogger ( __name__ )
 
 
-class Transport:
+class SocketTransport:
 	sock: socket.socket
 	
 	def _read ( self ) -> bytes:
@@ -28,7 +28,7 @@ class Transport:
 		self.sock.close()
 
 
-class Client ( Transport, smtp_sync.Client ):
+class Client ( SocketTransport, smtp_sync.Client ):
 	server_hostname: Opt[str] = None
 	ssl_context: Opt[ssl.SSLContext] = None
 	
@@ -48,7 +48,7 @@ class Client ( Transport, smtp_sync.Client ):
 				return
 		raise ConnectionError ( f'Unable to connect to {hostname=} {port=}' )
 	
-	def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+	def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None:
 		#log = logger.getChild ( 'Client.on_StartTlsBeginEvent' )
 		self._wrap_ssl()
 	
@@ -62,14 +62,14 @@ class Client ( Transport, smtp_sync.Client ):
 
 
 
-class Server ( Transport, smtp_sync.Server ):
+class Server ( SocketTransport, smtp_sync.Server ):
 	ssl_context: Opt[ssl.SSLContext] = None
 	
 	def run ( self, sock: socket.socket, tls: bool ) -> None:
 		self.sock = sock
 		self._run ( tls )
 	
-	def on_StartTlsBeginEvent ( self, event: smtp_proto.StartTlsBeginEvent ) -> None:
+	def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None:
 		if self.ssl_context is None:
 			self.ssl_context = ssl.create_default_context()
 			self.ssl_context.verify_mode = ssl.CERT_NONE

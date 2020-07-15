@@ -9,14 +9,14 @@ from typing import Optional as Opt
 
 # mail_proto imports:
 import pop3_proto as proto
-import pop3_async as base
+import pop3_async
 
 logger = logging.getLogger ( __name__ )
 
 happy_eyeballs_delay: float = 0.25 # this is the same as trio's default circa version 0.16.0
 
 
-class Transport:
+class TrioTransport:
 	stream: trio.abc.Stream
 	
 	async def _read ( self ) -> bytes:
@@ -38,7 +38,7 @@ class Transport:
 			await self.stream.aclose() # TODO FIXME: why sometimes getting hung up when in ssl?
 
 
-class Client ( Transport, base.Client ):
+class Client ( TrioTransport, pop3_async.Client ):
 	server_hostname: Opt[str] = None
 	ssl_context: Opt[ssl.SSLContext] = None
 	
@@ -66,7 +66,7 @@ class Client ( Transport, base.Client ):
 		)
 
 
-class Server ( Transport, base.Server ):
+class Server ( TrioTransport, pop3_async.Server ):
 	ssl_context: Opt[ssl.SSLContext] = None
 	
 	async def run ( self, stream: trio.abc.Stream, tls: bool, apop_challenge: Opt[str] = None ) -> None:
