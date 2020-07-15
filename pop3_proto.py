@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABCMeta, abstractmethod
 import base64
 import email.utils
+import hashlib
 import logging
 import re
 import traceback
@@ -66,9 +67,24 @@ class SuccessResponse ( Response ):
 	def __init__ ( self, message: str ) -> None:
 		return super().__init__ ( True, message )
 
+
 class ErrorResponse ( Response ):
 	def __init__ ( self, message: str ) -> None:
 		return super().__init__ ( False, message )
+
+
+class GreetingResponse ( SuccessResponse ):
+	apop_challenge: Opt[str]
+	
+	def __init__ ( self, message: str ) -> None:
+		m = re.search ( r'(<.*>)', message )
+		self.apop_challenge = m.group ( 1 ) if m else None
+		super().__init__ ( message )
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}({self.ok!r}, {self.message!r})'
+
 
 class MultiResponse ( SuccessResponse ):
 	def __init__ ( self, message: str, *lines: str ) -> None:
@@ -94,6 +110,7 @@ class MultiResponse ( SuccessResponse ):
 		cls = type ( self )
 		return f'{cls.__module__}.{cls.__name__}({self.ok!r}, {self.message!r}, {", ".join(map(repr,self.lines))})'
 
+
 class CapaResponse ( MultiResponse ):
 	capa: Dict[str,str]
 	
@@ -104,6 +121,7 @@ class CapaResponse ( MultiResponse ):
 		] )
 		return f'{cls.__module__}.{cls.__name__}({self.ok!r}, {self.message!r}, capa={{{capa_}}})'
 
+
 class StatResponse ( SuccessResponse ):
 	count: int
 	octets: int
@@ -111,6 +129,7 @@ class StatResponse ( SuccessResponse ):
 class ListMessage ( NamedTuple ):
 	id: int
 	octets: int
+
 
 class ListResponse ( SuccessResponse ):
 	count: int # TODO FIXME: not sure this is part of the spec
@@ -243,8 +262,8 @@ class StartTlsBeginEvent ( Event ):
 	pass
 
 
-class AuthEvent ( AcceptRejectEvent ):
-	success_message = 'maildrop ready' # TODO FIXME: "mrose's maildrop has 2 messages (320 octets)"
+class UserPassEvent ( AcceptRejectEvent ):
+	success_message = 'maildrop locked and ready' # TODO FIXME: "mrose's maildrop has 2 messages (320 octets)"
 	error_message = 'Authentication failed'
 	
 	def __init__ ( self, uid: str, pwd: str ) -> None:
@@ -257,7 +276,30 @@ class AuthEvent ( AcceptRejectEvent ):
 		return f'{cls.__module__}.{cls.__name__}(uid={self.uid!r})'
 
 
+def apop_hash ( challenge: str, pwd: str ) -> str:
+	# TODO FIXME: is this in the email library already maybe?
+	return hashlib.md5 ( s2b ( f'{challenge}{pwd}' ) ).hexdigest()
+
+class ApopEvent ( AcceptRejectEvent ):
+	success_message = 'maildrop locked and ready' # TODO FIXME: "mrose's maildrop has 2 messages (320 octets)"
+	error_message = 'authentication failed'
+	
+	def __init__ ( self, uid: str, challenge: str, digest: str ) -> None:
+		self.uid = uid
+		self.challenge = challenge
+		self.digest = digest
+	
+	def accept ( self ) -> None:
+		self._accept()
+	
+	def __repr__ ( self ) -> str:
+		cls = type ( self )
+		return f'{cls.__module__}.{cls.__name__}(uid={self.uid!r}, challenge={self.challenge!r})'
+
+
 class LockMaildropEvent ( AcceptRejectEvent ):
+	success_message = 'maildrop locked and ready' # TODO FIXME: "mrose's maildrop has 2 messages (320 octets)"
+	error_message = 'maildrop not available to be locked'
 	"""
 	This event indicates that a maildrop should be locked.
 	implementations should cache or flag the messages that are locked.
@@ -266,6 +308,10 @@ class LockMaildropEvent ( AcceptRejectEvent ):
 	
 	count: int
 	octets: int
+	
+	def __init__ ( self, maildrop: str ) -> None:
+		self.maildrop = maildrop
+		super().__init__()
 	
 	def accept ( self, count: int, octets: int ) -> None:
 		self.count = count
@@ -394,7 +440,9 @@ class Request ( metaclass = ABCMeta ):
 class GreetingRequest ( Request ):
 	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
-		yield from _client_proto_recv_done()
+		event = NeedDataEvent()
+		yield from _client_proto_recv_ok ( event )
+		raise GreetingResponse ( event.response.message )
 	
 	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		event = GreetingAcceptEvent ( server.apop_challenge )
@@ -491,6 +539,38 @@ class UserRequest ( Request ):
 			raise ErrorEvent ( 'SSL/TLS connection required' )
 		plugin: _Auth = plugincls.__new__ ( plugincls ) # bypass __init__()
 		yield from plugin._server_protocol ( server, moreargtext[0] if moreargtext else '' )
+
+
+_r_apop_request = re.compile ( r'\s*([^\s]+)\s*([^\s]+)\s*' )
+@request_verb ( 'APOP' )
+class ApopRequest ( _Auth ):
+	def __init__ ( self, uid: str, pwd: str, challenge: str ) -> None:
+		assert ' ' not in uid, f'invalid {uid=}'
+		assert challenge[0:1] == '<' and challenge[-1:], f'invalid {challenge=}'
+		self.uid = uid
+		self.challenge = challenge
+		self.digest = apop_hash ( challenge, pwd )
+	
+	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		yield from _client_proto_send_recv_done ( f'APOP {self.uid} {self.digest}\r\n' )
+	
+	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+		if not ( m := _r_apop_request.match ( argtext ) ):
+			raise ErrorEvent ( 'malformed request' )
+		uid, digest = m.groups()
+		event1 = ApopEvent ( uid = uid, challenge = server.apop_challenge, digest = digest )
+		yield from event1.go()
+		
+		server.auth_mailbox = uid
+		
+		event2 = LockMaildropEvent ( server.auth_mailbox )
+		yield from event2.go()
+		
+		yield SuccessEvent ( ' '.join ( [
+			f'maildrop has {event2.count!r}',
+			f'message{"s" if event2.count != 1 else ""}',
+			f'({event2.octets!r} octets)'
+		] ) )
 
 
 @request_verb ( 'RSET' )
