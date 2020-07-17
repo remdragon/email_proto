@@ -8,7 +8,7 @@ It also provides reference implementations with i/o.
 
 Download from [here](https://github.com/remdragon/email_proto)?
 
-**NOTE**: The reference trio implementation requires that you install trio `pip install trio`, but this isn't a strict dependency, in case you want to use a different i/o backend.
+**NOTE**: The unittests require that you install all supported async i/o backends `pip install anyio curio trio`, but these aren't dependencies of this project itself, only if you want to use those i/o backends.
 
 (Hopefully this can get hosted on pip someday)
 

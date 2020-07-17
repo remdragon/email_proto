@@ -2,16 +2,17 @@
 from abc import ABCMeta, abstractmethod
 from functools import partial
 import logging
+from mypy_extensions import KwArg, VarArg # pip install mypy_extensions
 import trio # pip install trio trio-typing
 import trio.testing
-from typing import Iterator
+from typing import Any, Callable, Coroutine, Iterator, List, Union, Type
 import unittest
 
 # mail_proto imports:
 import itrustme
 import smtp_proto as proto
 import smtp_trio
-from util import b2s
+from util import b2s, b64_encode_str
 
 logger = logging.getLogger ( __name__ )
 
@@ -27,18 +28,18 @@ class Tests ( unittest.TestCase ):
 		async def _test() -> None:
 			thing1, thing2 = trio.testing.lockstep_stream_pair()
 			
-			
-			# making sure the exception handler in the event loop gets coverage testing is going to take some trickiness
-			# the exception we're going to trigger is we're going to create a custom Event object to the Server, but the
-			# server won't have a handler so it will throw an AttributeError.
+			# event loop exception handler testing is going to be tricky
+			# create a custom Event object (PrintMoneyEvent)
+			# smtp_trio.Server won't have an on_PrintMoneyEvent()
+			# so it will throw an AttributeError.
 			class PrintMoneyEvent ( proto.Event ):
 				pass
 			# here's what we need to send/recv our new custom verb that will generate the bogus event:
 			@proto.request_verb ( 'XMONEY' )
-			class PrintMoneyRequest ( proto.Request ):
-				def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-					yield from proto._client_proto_send_recv_done ( 'XMONEY\r\n' )
-				def _server_protocol ( self, server: proto.Server, moreargtext: str ) -> proto.RequestProtocolGenerator:
+			class PrintMoneyRequest ( proto.Request[proto.SuccessResponse] ):
+				def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+					yield from proto.client_util.send_recv_done ( 'XMONEY\r\n' )
+				def server_protocol ( self, server: proto.Server, moreargtext: str ) -> proto.RequestProtocolGenerator:
 					with test.assertRaises ( AttributeError ):
 						try:
 							yield PrintMoneyEvent()
@@ -48,144 +49,171 @@ class Tests ( unittest.TestCase ):
 					raise proto.ResponseEvent ( 421, 'printer out of ink' )
 			# finally see inside client_task() where we trigger all this to test it.
 			
+			async def test_pass (
+				func: Callable[[],Coroutine[Any,Any,proto.Response]],
+				responserepr: str,
+				responsecls: Type[proto.Response] = proto.SuccessResponse,
+			) -> None:
+				try:
+					r: Union[proto.Response,Exception] = await func()
+				except Exception as e:
+					r = e
+				test.assertEqual ( repr ( r ), responserepr )
+				test.assertEqual ( type ( r ), responsecls )
+			
+			async def test_fail (
+				func: Callable[[],Coroutine[Any,Any,proto.Response]],
+				responserepr: str,
+				responsecls: Type[proto.Response] = proto.ErrorResponse,
+			) -> None:
+				try:
+					r = await func()
+				except Exception as e:
+					test.assertEqual ( repr ( e ), responserepr )
+					test.assertEqual ( type ( e ), responsecls )
+				else:
+					test.fail ( f'function returned {r=} but was expecting it to throw {responsrepr}' )
+			
+			TEST_FUNC = Union[
+				Callable[[],Coroutine[Any,Any,proto.ResponseType]],
+				#Callable[[],Coroutine[Any,Any,proto.SuccessResponse]],
+				#Callable[[],Coroutine[Any,Any,proto.ExpnResponse]],
+				#Callable[[],Coroutine[Any,Any,proto.EhloResponse]],
+			]
+			
+			async def test_helo_first ( func: TEST_FUNC[proto.ResponseType] ) -> None:
+				await test_fail (
+					func,
+					"smtp_proto.ErrorResponse(503, 'Say HELO first')",
+				)
+			
+			async def test_dup_helo ( func: TEST_FUNC[proto.ResponseType] ) -> None:
+				await test_fail (
+					func,
+					"smtp_proto.ErrorResponse(503, 'you already said HELO RFC1869#4.2')",
+				)
+			
+			async def test_must_auth ( func: TEST_FUNC[proto.ResponseType] ) -> None:
+				await test_fail (
+					func,
+					"smtp_proto.ErrorResponse(513, 'Must authenticate')",
+				)
+			
 			async def client_task ( stream: trio.abc.Stream ) -> None:
 				log = logger.getChild ( 'test_client_server.client_task' )
-				cli = smtp_trio.Client()
+				xport = smtp_trio.Transport ( stream )
+				xport.ssl_context = trust.client_context()
+				tls = False
+				cli = smtp_trio.Client ( xport, tls, 'milliways.local' )
+				
+				async def test_bad_param ( bad_param: str, bad_code: int, errtext: str ) -> None:
+					class BadRequest ( proto.RsetRequest ): # << base class doesn't matter much with this test...
+						bad_param: str
+						def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+							#log = logger.getChild ( 'BadStartTlsRequest.client_protocol' )
+							yield from proto.client_util.send_recv_ok (
+								f'{self.bad_param} FUBAR\r\n',
+							)
+					r = BadRequest()
+					r.bad_param = bad_param
+					r.base_response = None
+					await test_fail ( lambda: cli._request ( r ), # type: ignore
+						f"smtp_proto.ErrorResponse({bad_code!r}, '{errtext}')",
+					)
+				
 				try:
-					cli.ssl_context = trust.client_context()
-					cli.stream = stream
-					
-					test.assertEqual (
-						repr ( await cli._connect ( False ) ),
+					await test_pass (
+						cli.greeting,
 						"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 					)
 					
-					with test.assertRaises ( proto.ErrorResponse ):
-						try:
-							await cli._send_recv ( PrintMoneyRequest() )
-						except proto.ErrorResponse as e:
-							test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(421, 'printer out of ink')" )
-							raise
+					await test_fail (
+						lambda: cli._request ( PrintMoneyRequest() ), # type: ignore
+						"smtp_proto.ErrorResponse(421, 'printer out of ink')",
+					)
 					
-					
-					helo_first_funcs = [
-						cli.starttls,
-						partial ( cli.auth_login, 'Authur', 'Dent' ),
-						partial ( cli.expn, 'ford' ),
-						partial ( cli.mail_from, 'ceo_test.com' ),
-						partial ( cli.rcpt_to, 'to@test.com' ),
-						partial ( cli.data, b'foo' ),
-					]
-					for helo_first_func in helo_first_funcs:
-						with test.assertRaises ( proto.ErrorResponse ):
-							try:
-								await helo_first_func()
-							except proto.ErrorResponse as e:
-								test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'Say HELO first')" )
-								raise
+					await test_helo_first ( cli.starttls )
+					await test_helo_first ( lambda: cli.expn ( 'ford' ) )
+					await test_helo_first ( lambda: cli.mail_from ( 'ceo_test.com' ) )
+					await test_helo_first ( lambda: cli.rcpt_to ( 'to@test.com' ) )
+					await test_helo_first ( lambda: cli.data ( b'foo' ) )
 					
 					# NOTE we can't (currently) test a successful HELO and EHLO in a single session, so I'll test HELO in a different unittest
-					r = await cli.ehlo ( 'localhost' )
-					test.assertEqual ( type ( r ), proto.EhloResponse )
-					test.assertEqual ( r.code, 250 )
-					test.assertEqual ( sorted ( r.esmtp_features.items() ), [
+					r1 = await cli.ehlo ( 'localhost' )
+					test.assertEqual ( type ( r1 ), proto.EhloResponse )
+					test.assertEqual ( r1.code, 250 )
+					test.assertEqual ( sorted ( r1.esmtp_features.items() ), [
 						( '8BITMIME', '' ),
 						( 'FOO', 'BAR' ),
 						( 'PIPELINING', '' ),
 						( 'STARTTLS', '' ),
 					] )
-					#test.assertEqual ( sorted ( r.esmtp_auth ), [ 'LOGIN', 'PLAIN' ] )
+					#test.assertEqual ( sorted ( r1.esmtp_auth ), [ 'LOGIN', 'PLAIN' ] )
 					
-					dup_helo_funcs = [
-						partial ( cli.helo, 'localhost' ),
-						partial ( cli.ehlo, 'localhost' ),
-					]
-					for dup_helo_func in dup_helo_funcs:
-						with test.assertRaises ( proto.ErrorResponse ):
-							try:
-								await dup_helo_func()
-							except proto.ErrorResponse as e:
-								test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(503, 'you already said HELO RFC1869#4.2')" )
-								raise
+					await test_dup_helo ( lambda: cli.helo ( 'localhost' ) )
+					await test_dup_helo ( lambda: cli.ehlo ( 'localhost' ) )
 					
 					test.assertEqual ( repr ( await cli.rset() ), "smtp_proto.SuccessResponse(250, 'OK')" )
 					
-					must_auth_funcs = [
-						partial ( cli.expn, 'ford' ),
-						partial ( cli.mail_from, 'cel@test.com' ),
-						partial ( cli.rcpt_to, 'to@test.com' ),
-						partial ( cli.data, b'foo' ),
-					]
-					for must_auth_func in must_auth_funcs:
-						with test.assertRaises ( proto.ErrorResponse ):
-							try:
-								await must_auth_func()
-							except proto.ErrorResponse as e:
-								test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(513, 'Must authenticate')" )
-								raise
+					await test_must_auth ( lambda: cli.expn ( 'ford' ) )
+					await test_must_auth ( lambda: cli.mail_from ( 'cel@test.com' ) )
+					await test_must_auth ( lambda: cli.rcpt_to ( 'to@test.com' ) )
+					await test_must_auth ( lambda: cli.data ( b'foo' ) )
 					
 					if True:
 						# make sure server doesn't allow us to use tls-required AUTH method outside of TLS
-						with test.assertRaises ( proto.ErrorResponse ):
-							try:
-								await cli.auth_login ( 'Arthur', 'Dent' )
-							except proto.ErrorResponse as e:
-								test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(535, 'SSL/TLS connection required')" )
-								raise
+						await test_fail (
+							lambda: cli.auth_login ( 'Arthur', 'Dent' ),
+							"smtp_proto.ErrorResponse(535, 'SSL/TLS connection required')",
+						)
+					
+					await test_bad_param ( 'STARTTLS FUBAR', 501, 'Syntax error (no extra parameters allowed)' )
 					
 					test.assertEqual (
 						repr ( await cli.starttls() ),
 						"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 					)
 					
+					await test_helo_first ( lambda: cli.auth_login ( 'Authur', 'Dent' ) )
+					
+					test.assertEqual (
+						repr ( await cli.helo ( 'localhost' ) ),
+						"smtp_proto.SuccessResponse(250, 'milliways.local greets localhost')",
+					)
+					
+					await test_fail ( lambda: cli.starttls(),
+						"smtp_proto.ErrorResponse(535, 'Command not available in SSL/TLS')",
+					)
+					
 					if True:
-						bad_params = [
-							( 'AUTH LOGIN', 'Syntax error (no extra parameters allowed)' ),
-							( 'DATA', 'Syntax error (no parameters allowed) RFC5321#4.3.2' ),
-							( 'QUIT', 'Syntax error (no parameters allowed) RFC5321#4.3.2' ),
-							( 'RSET', 'Syntax error (no parameters allowed) RFC5321#4.3.2' ),
-							( 'STARTTLS', 'Syntax error (no extra parameters allowed)' ),
-						]
-						class BadRequest ( proto.RsetRequest ): # << base class doesn't matter much with this test...
-							bad_param: str
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								#log = logger.getChild ( 'BadStartTlsRequest._client_protocol' )
-								yield from proto._client_proto_send_recv_ok ( f'{self.bad_param} FUBAR\r\n' )
-						r = BadRequest()
-						for bad_param, errtext in bad_params:
-							r.bad_param = bad_param
-							r.response = None
-							with test.assertRaises ( proto.ErrorResponse ):
-								try:
-									await cli._send_recv ( r )
-								except proto.ErrorResponse as e:
-									test.assertEqual ( repr ( e ),
-										f"smtp_proto.ErrorResponse(501, '{errtext}')",
-									)
-									raise
+						await test_bad_param ( 'AUTH LOGIN FUBAR', 501, 'Syntax error (no extra parameters allowed)' )
+						await test_bad_param ( 'DATA FUBAR', 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
+						await test_bad_param ( 'QUIT FUBAR', 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
+						await test_bad_param ( 'RSET FUBAR', 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
+						await test_bad_param ( 'X123', 500, 'Command not recognized' ) # <<< trigger command parsing regex failure
 					
 					if True: # request a non-existent AUTH mechanism
-						class AuthFubarRequest ( proto.Request ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								log = logger.getChild ( 'AuthFubarRequest._client_protocol' )
-								yield from proto._client_proto_send_recv_done ( f'AUTH FUBAR\r\n' )
-							def _server_protocol ( self, server: proto.Server, moreargtext: str ) -> proto.RequestProtocolGenerator:
+						class AuthFubarRequest ( proto.Request[proto.SuccessResponse] ):
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								log = logger.getChild ( 'AuthFubarRequest.client_protocol' )
+								yield from proto.client_util.send_recv_done ( f'AUTH FUBAR\r\n' )
+							def server_protocol ( self, server: proto.Server, moreargtext: str ) -> proto.RequestProtocolGenerator:
 								assert False
 						with test.assertRaises ( proto.ErrorResponse ):
 							try:
-								await cli._send_recv ( AuthFubarRequest() )
+								await cli._request ( AuthFubarRequest() )
 							except proto.ErrorResponse as e:
 								test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(504, 'Unrecognized authentication mechanism: FUBAR')" )
 								raise
 					
 					if True: # construct an invalid AUTH PLAIN request to trigger specific error handling in the server-side protocol
 						class BadAuthPlain1Request ( proto.AuthPlain1Request ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								log = logger.getChild ( 'HeloRequest._client_protocol' )
-								yield from proto._client_proto_send_recv_done ( f'AUTH PLAIN BAADF00D\r\n' )
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								log = logger.getChild ( 'HeloRequest.client_protocol' )
+								yield from proto.client_util.send_recv_done ( f'AUTH PLAIN BAADF00D\r\n' )
 						with test.assertRaises ( proto.ErrorResponse ):
 							try:
-								await cli._send_recv ( BadAuthPlain1Request ( 'baad', 'f00d' ) )
+								await cli._request ( BadAuthPlain1Request ( 'baad', 'f00d' ) )
 							except proto.ErrorResponse as e:
 								test.assertEqual ( repr ( e ),
 									"smtp_proto.ErrorResponse(501, 'malformed auth input RFC4616#2')"
@@ -194,15 +222,15 @@ class Tests ( unittest.TestCase ):
 					
 					if False:
 						class BadAuthLoginRequest ( proto.AuthLoginRequest ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								#log = logger.getChild ( 'AuthLoginRequest._client_protocol' )
-								yield from proto._client_proto_send_recv_ok ( 'AUTH LOGIN FUBAR\r\n' )
-								yield from proto._client_proto_send_recv_ok ( f'{b64_encode(self.uid)}\r\n' )
-								yield from proto._client_proto_send_recv_done ( f'{b64_encode(self.pwd)}\r\n' )
-						r = BadAuthLoginRequest ( 'foo', 'bar' )
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								#log = logger.getChild ( 'AuthLoginRequest.client_protocol' )
+								yield from proto.client_util.send_recv_ok ( 'AUTH LOGIN FUBAR\r\n' )
+								yield from proto.client_util.send_recv_ok ( f'{b64_encode_str(self.uid)}\r\n' )
+								yield from proto.client_util.send_recv_done ( f'{b64_encode_str(self.pwd)}\r\n' )
+						r3 = BadAuthLoginRequest ( 'foo', 'bar' )
 						with test.assertRaises ( proto.ErrorResponse ):
 							try:
-								await cli._send_recv ( r )
+								await cli._request ( r3 )
 							except proto.ErrorResponse as e:
 								test.assertEqual ( repr ( e ),
 									"smtp_proto.ErrorResponse(501, 'Syntax error (no extra parameters allowed)')",
@@ -211,15 +239,15 @@ class Tests ( unittest.TestCase ):
 					
 					if True:
 						class BadAuthLoginRequest2 ( proto.AuthLoginRequest ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								#log = logger.getChild ( 'AuthLoginRequest._client_protocol' )
-								yield from proto._client_proto_send_recv_ok ( 'AUTH LOGIN\r\n' )
-								yield from proto._client_proto_send_recv_ok ( 'BADF00D\r\n' )
-								yield from proto._client_proto_send_recv_done ( 'BADF00D\r\n' )
-						r = BadAuthLoginRequest2 ( 'foo', 'bar' )
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								#log = logger.getChild ( 'AuthLoginRequest.client_protocol' )
+								yield from proto.client_util.send_recv_ok ( 'AUTH LOGIN\r\n' )
+								yield from proto.client_util.send_recv_ok ( 'BADF00D\r\n' )
+								yield from proto.client_util.send_recv_done ( 'BADF00D\r\n' )
+						r4 = BadAuthLoginRequest2 ( 'foo', 'bar' )
 						with test.assertRaises ( proto.ErrorResponse ):
 							try:
-								await cli._send_recv ( r )
+								await cli._request ( r4 )
 							except proto.ErrorResponse as e:
 								test.assertEqual ( repr ( e ),
 									"smtp_proto.ErrorResponse(501, 'malformed auth input RFC4616#2')"
@@ -256,7 +284,7 @@ class Tests ( unittest.TestCase ):
 						r = proto.ExpnRequest ( 'ford' )
 						r.mailbox = ''
 						try:
-							await cli._send_recv ( r )
+							await cli._request ( r )
 						except proto.ErrorResponse as e:
 							test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(501, 'missing required mailbox parameter')" )
 							raise
@@ -277,20 +305,20 @@ class Tests ( unittest.TestCase ):
 					
 					with test.assertRaises ( proto.ErrorResponse ):
 						class MaleFromRequest ( proto.MailFromRequest ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								yield from proto._client_proto_send_recv_done ( f'MALE FROM:<{self.mail_from}>\r\n' )
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								yield from proto.client_util.send_recv_done ( f'MALE FROM:<{self.mail_from}>\r\n' )
 						try:
-							await cli._send_recv ( MaleFromRequest ( 'foo@bar.com' ) )
+							await cli._request ( MaleFromRequest ( 'foo@bar.com' ) )
 						except proto.ErrorResponse as e:
 							test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(500, 'Command not recognized')" )
 							raise
 					
 					with test.assertRaises ( proto.ErrorResponse ):
 						class MailFrumRequest ( proto.MailFromRequest ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								yield from proto._client_proto_send_recv_done ( f'MAIL FRUM:<{self.mail_from}>\r\n' )
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								yield from proto.client_util.send_recv_done ( f'MAIL FRUM:<{self.mail_from}>\r\n' )
 						try:
-							await cli._send_recv ( MailFrumRequest ( 'foo@bar.com' ) )
+							await cli._request ( MailFrumRequest ( 'foo@bar.com' ) )
 						except proto.ErrorResponse as e:
 							test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(501, 'malformed MAIL input')" )
 							raise
@@ -313,10 +341,10 @@ class Tests ( unittest.TestCase ):
 					
 					with test.assertRaises ( proto.ErrorResponse ):
 						class RcptTooRequest ( proto.RcptToRequest ):
-							def _client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
-								yield from proto._client_proto_send_recv_done ( f'RCPT TOO:<{self.rcpt_to}>\r\n' )
+							def client_protocol ( self, client: proto.Client ) -> proto.RequestProtocolGenerator:
+								yield from proto.client_util.send_recv_done ( f'RCPT TOO:<{self.rcpt_to}>\r\n' )
 						try:
-							await cli._send_recv ( RcptTooRequest ( 'foo@bar.com' ) )
+							await cli._request ( RcptTooRequest ( 'foo@bar.com' ) )
 						except proto.ErrorResponse as e:
 							test.assertEqual ( repr ( e ), "smtp_proto.ErrorResponse(501, 'malformed RCPT input')" )
 							raise
@@ -346,7 +374,7 @@ class Tests ( unittest.TestCase ):
 						b'This is a test.\r\n'
 						b'.<<< Evil line beginning with a dot\r\n'
 						b'Last line of message\r\n'
-						b'.' # << trigger an edge case inside DataRequest._client_protocol() for code coverage reasons
+						b'.' # << trigger an edge case inside DataRequest.client_protocol() for code coverage reasons
 					) ), "smtp_proto.SuccessResponse(250, 'Message accepted for delivery')" )
 					
 					test.assertEqual ( repr ( await cli.rset() ), "smtp_proto.SuccessResponse(250, 'OK')" )
@@ -408,11 +436,13 @@ class Tests ( unittest.TestCase ):
 							test.assertEqual ( lines[10], b'?????' )
 						event.accept() # or .reject()
 				
-				srv = TestServer ( 'milliways.local' )
+				xport = smtp_trio.Transport ( stream )
+				xport.ssl_context = trust.server_context()
+				tls = False
+				srv = TestServer ( xport, tls, 'milliways.local' )
 				
 				try:
-					srv.ssl_context = trust.server_context()
-					await srv.run ( stream, False )
+					await srv.run()
 				except proto.Closed:
 					pass
 				finally:

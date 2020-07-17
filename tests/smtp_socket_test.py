@@ -5,6 +5,7 @@ import socket
 import ssl
 import sys
 import threading
+from typing import Callable, Type
 import unittest
 
 # mail_proto imports:
@@ -27,91 +28,109 @@ else:
 
 class Tests ( unittest.TestCase ):
 	def test_ping_pong ( self ) -> None:
+		test = self
+		
 		thing1, thing2 = socket.socketpair()
 		
 		def client_task ( sock: socket.socket ) -> None:
 			log = logger.getChild ( 'test_auth_plain1.client_task' )
-			cli = smtp_socket.Client()
+			xport = smtp_socket.Transport ( sock )
+			xport.ssl_context = trust.client_context()
+			tls = False
+			cli = smtp_socket.Client ( xport, tls, 'milliways.local' )
+			
+			def test_pass (
+				func: Callable[[],smtp_proto.Response],
+				responserepr: str,
+				responsecls: Type[smtp_proto.Response] = smtp_proto.SuccessResponse,
+			) -> None:
+				try:
+					r = func()
+				except Exception as e:
+					r = e
+				test.assertEqual ( repr ( r ), responserepr )
+				test.assertEqual ( type ( r ), responsecls )
+			
+			def test_fail (
+				func: Callable[[],smtp_proto.Response],
+				responserepr: str,
+				responsecls: Type[smtp_proto.Response] = smtp_proto.ErrorResponse,
+			) -> None:
+				try:
+					r = func()
+				except Exception as e:
+					test.assertEqual ( repr ( e ), responserepr )
+					test.assertEqual ( type ( e ), responsecls )
+				else:
+					test.fail ( f'function did not throw an error but returned {r=}' )
+			
 			try:
-				cli.server_hostname = 'milliways.local'
-				cli.ssl_context = trust.client_context()
-				cli.sock = sock
-				
-				self.assertEqual (
-					repr ( cli._connect ( False ) ),
+				test_pass ( cli.greeting,
 					"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 				)
 				
-				with self.assertRaises ( smtp_proto.ErrorResponse ):
-					try:
-						r = smtp_proto.HeloRequest ( 'localhost' )
-						r.domain = ''
-						return cli._send_recv ( r )
-					except smtp_proto.ErrorResponse as e:
-						self.assertEqual ( repr ( e ),
-							"smtp_proto.ErrorResponse(501, 'missing required hostname parameter')",
-						)
-						raise
+				r1 = smtp_proto.HeloRequest ( 'localhost' )
+				r1.domain = ''
+				test_fail ( lambda: cli._request ( r1 ),
+					"smtp_proto.ErrorResponse(501, 'missing required hostname parameter')",
+				)
 				
-				with self.assertRaises ( smtp_proto.ErrorResponse ):
-					try:
-						r = smtp_proto.EhloRequest ( 'localhost' )
-						r.domain = ''
-						return cli._send_recv ( r )
-					except smtp_proto.ErrorResponse as e:
-						self.assertEqual ( repr ( e ),
-							"smtp_proto.ErrorResponse(501, 'missing required hostname parameter')",
-						)
-						raise
+				r1 = smtp_proto.EhloRequest ( 'localhost' )
+				r1.domain = ''
+				test_fail ( lambda: cli._request ( r1 ),
+					"smtp_proto.ErrorResponse(501, 'missing required hostname parameter')",
+				)
 				
-				self.assertEqual (
-					repr ( cli.helo ( 'localhost' ) ),
+				test_pass ( lambda: cli.helo ( 'localhost' ),
 					"smtp_proto.SuccessResponse(250, 'milliways.local greets localhost')",
 				)
 				
-				self.assertEqual (
-					repr ( cli.starttls() ),
+				test_pass ( lambda: cli.starttls(),
 					"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 				)
 				
-				self.assertEqual (
-					repr ( cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' ) ),
+				test_pass ( lambda: cli.helo ( 'localhost' ),
+					"smtp_proto.SuccessResponse(250, 'milliways.local greets localhost')",
+				)
+				
+				test_pass (
+					lambda: cli.auth_plain1 ( 'Zaphod', 'Beeblebrox' ),
 					"smtp_proto.SuccessResponse(235, 'Authentication successful')",
 				)
 				
-				self.assertEqual (
-					repr ( cli.expn ( 'mike' ) ),
+				test_pass ( lambda: cli.expn ( 'mike' ),
 					"smtp_proto.ExpnResponse(250, 'mike@abc.com')",
+					smtp_proto.ExpnResponse,
 				)
 				
-				self.assertEqual (
-					repr ( cli.vrfy ( 'users-hackers' ) ),
+				test_pass ( lambda: cli.vrfy ( 'users-hackers' ),
 					"smtp_proto.VrfyResponse(250, 'carol@abc.com', 'greg@abc.com', 'marcha@abc.com', 'peter@abc.com')",
+					smtp_proto.VrfyResponse,
 				)
 				
-				self.assertEqual (
-					repr ( cli.mail_from ( 'from@test.com' ) ),
+				test_pass ( lambda: cli.mail_from ( 'from@test.com' ),
 					"smtp_proto.SuccessResponse(250, 'OK')",
 				)
 				
-				self.assertEqual (
-					repr ( cli.rcpt_to ( 'to@test.com' ) ),
+				test_pass ( lambda: cli.rcpt_to ( 'to@test.com' ),
 					"smtp_proto.SuccessResponse(250, 'OK')",
 				)
 				
-				self.assertEqual ( repr ( cli.data (
-					b'From: from@test.com\r\n'
-					b'To: to@test.com\r\n'
-					b'Subject: Test email\r\n'
-					b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
-					b'\r\n' # a sane person would use the email module to create their email content...
-					b'This is a test. This message does not end in a period, period.\r\n'
-					b'.<<< Evil line beginning with a dot\r\n'
-					b'Last line of message\r\n'
-				) ), "smtp_proto.SuccessResponse(250, 'Message accepted for delivery')" )
+				test_pass ( lambda: cli.data (
+						b'From: from@test.com\r\n'
+						b'To: to@test.com\r\n'
+						b'Subject: Test email\r\n'
+						b'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
+						b'\r\n' # a sane person would use the email module to create their email content...
+						b'This is a test. This message does not end in a period, period.\r\n'
+						b'.<<< Evil line beginning with a dot\r\n'
+						b'Last line of message\r\n'
+					),
+					"smtp_proto.SuccessResponse(250, 'Message accepted for delivery')",
+				)
 				
-				self.assertEqual (
-					repr ( cli.quit() ),
+				test_pass (
+					lambda: cli.quit(),
 					"smtp_proto.SuccessResponse(221, 'Closing connection')",
 				)
 			
@@ -156,18 +175,27 @@ class Tests ( unittest.TestCase ):
 					event.accept() # or .reject()
 				
 				def on_CompleteEvent ( self, event: smtp_proto.CompleteEvent ) -> None:
-					log.debug ( f'MAIL FROM: {event.mail_from}' )
-					for rcpt_to in event.rcpt_to:
-						log.debug ( f'RCPT TO: {rcpt_to}' )
-					log.debug ( '-' * 20 )
-					log.debug ( b2s ( b''.join ( event.data ) ) )
+					test.assertEqual ( event.mail_from, 'from@test.com' )
+					test.assertEqual ( event.rcpt_to, [ 'to@test.com' ] )
+					test.assertEqual ( b2s ( b''.join ( event.data ) ),
+						'From: from@test.com\r\n'
+						'To: to@test.com\r\n'
+						'Subject: Test email\r\n'
+						'Date: 2000-01-01T00:00:00Z\r\n' # yes I know this isn't formatted correctly...
+						'\r\n' # a sane person would use the email module to create their email content...
+						'This is a test. This message does not end in a period, period.\r\n'
+						'.<<< Evil line beginning with a dot\r\n'
+						'Last line of message\r\n'
+					)
 					event.accept() # or .reject()
 			
-			srv = TestServer ( 'milliways.local' )
+			xport = smtp_socket.Transport ( sock )
+			xport.ssl_context = trust.server_context()
+			tls = False
+			srv = TestServer ( xport, tls, 'milliways.local' )
 			
 			try:
-				srv.ssl_context = trust.server_context()
-				srv.run ( sock, False )
+				srv.run()
 			except smtp_proto.Closed:
 				pass
 			except Exception:
@@ -190,16 +218,15 @@ class Tests ( unittest.TestCase ):
 		thing1, thing2 = socket.socketpair()
 		
 		def client_task ( sock: socket.socket ) -> None:
-			log = logger.getChild ( 'test_auth_plain1.client_task' )
+			log = logger.getChild ( 'test_RFC5321_D1_replay.client_task' )
 			try:
-				cli = smtp_socket.Client()
-				
-				cli.server_hostname = 'milliways.local'
-				cli.ssl_context = trust.client_context()
-				cli.sock = sock
+				xport = smtp_socket.Transport ( sock )
+				xport.ssl_context = trust.client_context()
+				tls = False
+				cli = smtp_socket.Client ( xport, tls, 'milliways.local' )
 				
 				self.assertEqual (
-					repr ( cli._connect ( False ) ),
+					repr ( cli.greeting() ),
 					"smtp_proto.SuccessResponse(220, 'foo.com Simple Mail Transfer Service Ready')",
 				)
 				
@@ -248,7 +275,7 @@ class Tests ( unittest.TestCase ):
 				cli.close()
 		
 		def server_task ( sock: socket.socket ) -> None:
-			log = logger.getChild ( 'test_auth_plain1.server_task' )
+			log = logger.getChild ( 'test_RFC5321_D1_replay.server_task' )
 			def expect ( request: bytes, response: bytes ) -> None:
 				received = b''
 				while len ( received ) < len ( request ):

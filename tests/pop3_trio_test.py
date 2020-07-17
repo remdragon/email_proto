@@ -29,17 +29,18 @@ class Tests ( unittest.TestCase ):
 			
 			async def client_task ( stream: trio.abc.Stream ) -> None:
 				log = logger.getChild ( 'test_client_server.client_task' )
-				cli = pop3_trio.Client()
+				xport = pop3_trio.Transport ( stream )
+				xport.ssl_context = trust.client_context()
+				tls = False
+				cli = pop3_trio.Client ( xport, tls, 'milliways.local' )
 				try:
-					cli.ssl_context = trust.client_context()
-					cli.stream = stream
-					
-					r1 = await cli._connect ( False )
+					r1 = await cli.greeting()
 					test.assertEqual (
 						repr ( r1 ),
 						"pop3_proto.GreetingResponse(True, 'POP3 server ready <1896.697170952@dbc.mtview.ca.us>')",
 					)
 					test.assertEqual ( r1.apop_challenge, '<1896.697170952@dbc.mtview.ca.us>' )
+					assert r1.apop_challenge is not None # make mypy happy
 					
 					test.assertEqual (
 						repr ( await cli.capa() ),
@@ -68,10 +69,13 @@ class Tests ( unittest.TestCase ):
 				class TestServer ( pop3_trio.Server ):
 					locked: bool = False
 					
+					async def on_ApopChallengeEvent ( self, event: proto.ApopChallengeEvent ) -> None:
+						event.accept ( '<1896.697170952@dbc.mtview.ca.us>' ) # example from RFC1939#7 example
+					
 					async def on_StartTlsAcceptEvent ( self, event: proto.StartTlsAcceptEvent ) -> None:
 						event.accept()
 					
-					async def on_ApopEvent ( self, event: proto.ApopEvent ) -> None:
+					async def on_ApopAuthEvent ( self, event: proto.ApopAuthEvent ) -> None:
 						if event.uid == 'mrose':
 							digest = proto.apop_hash ( event.challenge, 'tanstaaf' )
 							test.assertEqual ( digest, event.digest )
@@ -86,12 +90,13 @@ class Tests ( unittest.TestCase ):
 						self.locked = True
 						event.accept ( 42, 1492 )
 				
-				srv = TestServer ( 'milliways.local' )
+				xport = pop3_trio.Transport ( stream )
+				xport.ssl_context = trust.server_context()
+				tls = False
+				srv = TestServer ( xport, tls, 'milliways.local' )
 				
-				apop_challenge = '<1896.697170952@dbc.mtview.ca.us>' # example from RFC1939#7 example
 				try:
-					srv.ssl_context = trust.server_context()
-					await srv.run ( stream, False, apop_challenge )
+					await srv.run()
 				except proto.Closed:
 					pass
 				finally:

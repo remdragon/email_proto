@@ -14,37 +14,35 @@ from typing import (
 )
 
 # email_proto imports:
+from base_proto import (
+	BaseResponse, ResponseType, BaseRequest, RequestT, Event, NeedDataEvent,
+	SendDataEvent, Closed, RequestProtocolGenerator, ClientProtocol,
+	ServerProtocol,
+	ClientUtil,
+)
 from util import bytes_types, BYTES, b2s, s2b, b64_encode_str, b64_decode_str
 
 logger = logging.getLogger ( __name__ )
 
-_MAXLINE = 8192 # more than 8 times larger than RFC 821, 4.5.3
 
 _r_eol = re.compile ( r'[\r\n]' )
 _r_mail_from = re.compile ( r'\s*FROM\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
 _r_rcpt_to = re.compile ( r'\s*TO\s*:\s*<?([^>]*)>?\s*$', re.I ) # RFC5321#2.4 command verbs are not case sensitive
 _r_crlf_dot = re.compile ( b'\\r\\n\\.', re.M )
 
-class Closed ( Exception ): # TODO FIXME: BaseException?
-	def __init__ ( self, reason: str = '' ) -> None:
-		super().__init__ ( reason or '(none given)' )
-
-class ProtocolError ( Exception ):
-	pass
-
 #endregion
 #region RESPONSES -------------------------------------------------------------
 
-ResponseType = TypeVar ( 'ResponseType', bound = 'Response' )
-class Response ( Exception ):
+class Response ( BaseResponse ):
 	def __init__ ( self, code: int, *lines: str ) -> None:
 		self.code = code
 		assert lines and all ( isinstance ( line, str ) for line in lines ), f'invalid {lines=}'
 		self.lines = lines
-		super().__init__ ( code, *lines )
+		super().__init__()
 	
 	@staticmethod
-	def parse ( line: Opt[bytes] ) -> Union[SuccessResponse,ErrorResponse,IntermediateResponse]:
+	def parse ( line: BYTES ) -> Union[SuccessResponse,ErrorResponse,IntermediateResponse]:
+		#log = logger.getChild ( 'Response.parse' )
 		assert isinstance ( line, bytes_types )
 		try:
 			code = int ( line[:3] )
@@ -67,13 +65,23 @@ class Response ( Exception ):
 
 
 class SuccessResponse ( Response ):
-	pass
+	def __init__ ( self, code: int, *lines: str ) -> None:
+		assert 200 <= code < 400
+		super().__init__ ( code, *lines )
+	def is_success ( self ) -> bool:
+		return True
+
 
 class ErrorResponse ( Response ):
-	pass
+	def __init__ ( self, code: int, *lines: str ) -> None:
+		assert 400 <= code <= 599
+		super().__init__ ( code, *lines )
+	def is_success ( self ) -> bool:
+		return False
 
 class IntermediateResponse ( Response ):
-	pass
+	def is_success ( self ) -> bool:
+		return True
 
 
 class EhloResponse ( SuccessResponse ):
@@ -90,43 +98,11 @@ class ExpnResponse ( ExpnVrfyResponse ):
 class VrfyResponse ( ExpnVrfyResponse ):
 	pass
 
+
+client_util = ClientUtil ( Response.parse )
+
 #endregion
 #region EVENTS ----------------------------------------------------------------
-
-class Event ( Exception ):
-	exc_info: Opt[Union[Tuple[Type[BaseException],BaseException,TracebackType],Tuple[None,None,None]]] = None
-	
-	def go ( self ) -> Iterator[Event]:
-		yield self
-	
-	def __repr__ ( self ) -> str:
-		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}()'
-
-
-class NeedDataEvent ( Event ):
-	data: Opt[bytes] = None
-	response: Opt[Response] = None
-	
-	def reset ( self ) -> NeedDataEvent:
-		self.data = None
-		self.response = None
-		return self
-	
-	def go ( self ) -> Iterator[Event]:
-		self.reset()
-		yield from super().go()
-
-
-class SendDataEvent ( Event ):
-	
-	def __init__ ( self, *chunks: bytes ) -> None:
-		self.chunks: Seq[bytes] = chunks
-	
-	def __repr__ ( self ) -> str:
-		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}(chunks={self.chunks!r})'
-
 
 def ResponseEvent ( code: int, *lines: str ) -> SendDataEvent:
 	seps = [ '-' ] * len ( lines )
@@ -136,6 +112,7 @@ def ResponseEvent ( code: int, *lines: str ) -> SendDataEvent:
 		for sep, line in zip ( seps, lines )
 	) ), )
 	return SendDataEvent ( *chunks )
+
 
 class AcceptRejectEvent ( Event ):
 	success_code: int
@@ -328,39 +305,38 @@ class CompleteEvent ( AcceptRejectEvent ):
 #endregion
 #region REQUESTS --------------------------------------------------------------
 
-def _client_proto_send ( line: str ) -> Iterator[Event]:
-	assert line.endswith ( '\r\n' ), f'invalid {line=}'
-	yield from ( event := SendDataEvent ( s2b ( line ) ) ).go()
+class Request ( RequestT[ResponseType] ):
+	def _client_protocol ( self, client: ClientProtocol ) -> RequestProtocolGenerator:
+		assert isinstance ( client, Client )
+		yield from self.client_protocol ( client )
+	
+	@classmethod
+	def subparse ( cls: Type[Request[ResponseType]],
+		server: Server,
+		argtext: str,
+	) -> Tuple[Type[Request[ResponseType]],str]:
+		return cls, argtext
+	
+	@abstractmethod
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		cls = self.__class__
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.client_protocol()' )
+	
+	def _server_protocol ( self, server: ServerProtocol, prefix: str, suffix: str ) -> RequestProtocolGenerator:
+		assert isinstance ( server, Server )
+		assert not prefix
+		yield from self.server_protocol ( server, suffix )
+	
+	@abstractmethod
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+		cls = self.__class__
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.server_protocol()' )
 
-def _client_proto_recv_ok ( event: NeedDataEvent ) -> Iterator[Event]:
-	yield from event.reset().go()
-	event.response = Response.parse ( event.data )
-	if isinstance ( event.response, ErrorResponse ):
-		raise event.response
 
-def _client_proto_recv_done() -> Iterator[Event]:
-	log = logger.getChild ( '_client_proto_recv_done' )
-	yield from ( event := NeedDataEvent() ).go()
-	response = Response.parse ( event.data )
-	raise response
+_request_verbs: Dict[str,Type[BaseRequest]] = {}
 
-def _client_proto_send_recv_ok ( line: str ) -> Iterator[Event]:
-	log = logger.getChild ( '_client_proto_send_recv_ok' )
-	yield from _client_proto_send ( line )
-	yield from ( event := NeedDataEvent() ).go()
-	response = Response.parse ( event.data )
-	if not isinstance ( response, SuccessResponse ):
-		raise response
-
-def _client_proto_send_recv_done ( line: str ) -> Iterator[Event]:
-	yield from _client_proto_send ( line )
-	yield from _client_proto_recv_done()
-
-
-_request_verbs: Dict[str,Type[Request]] = {}
-
-def request_verb ( verb: str ) -> Callable[[Type[Request]],Type[Request]]:
-	def registrar ( cls: Type[Request] ) -> Type[Request]:
+def request_verb ( verb: str ) -> Callable[[Type[BaseRequest]],Type[BaseRequest]]:
+	def registrar ( cls: Type[BaseRequest] ) -> Type[BaseRequest]:
 		global _request_verbs
 		assert verb == verb.upper() and ' ' not in verb and len ( verb ) <= 71, f'invalid auth mechanism {verb=}'
 		assert verb not in _request_verbs, f'duplicate request verb {verb!r}'
@@ -380,39 +356,14 @@ def auth_plugin ( name: str ) -> Callable[[Type[_Auth]],Type[_Auth]]:
 	return registrar
 
 
-RequestProtocolGenerator = Generator[Event,None,None]
-
-class Request ( metaclass = ABCMeta ):
-	# this class is the basis of all client/server command handling
-	# 1) client uses __init__() to construct request
-	# 2) server bypasses __init__() for technical reasons
-	# 3) _client_protocol() implements client-side state machine
-	# 4) _server_protocol() implements server-side state machine
-	# see _Auth class for AUTH plugins
-	# users are be able to create their own custom Request objects
-	response: Opt[Response] = None
+class GreetingRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
 	
-	def __repr__ ( self ) -> str:
-		cls = type ( self )
-		return f'{cls.__module__}.{cls.__name__}()'
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'GreetingRequest.client_protocol' )
+		yield from client_util.recv_done()
 	
-	@abstractmethod
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._client_protocol()' )
-	
-	@abstractmethod
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._server_protocol()' )
-
-
-class GreetingRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'GreetingRequest._client_protocol' )
-		yield from _client_proto_recv_done()
-	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		# if too busy, can also return:
 		#	421-{self.hostname} is too busy to accept mail right now.
 		#	421 Please come back in {delay} seconds.
@@ -428,16 +379,19 @@ class GreetingRequest ( Request ):
 
 
 @request_verb ( 'HELO' )
-class HeloRequest ( Request ):
+class HeloRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
+	
 	def __init__ ( self, domain: str ) -> None:
 		self.domain = str ( domain ).strip()
 		assert len ( self.domain ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'HeloRequest._client_protocol' )
-		yield from _client_proto_send_recv_done ( f'HELO {self.domain}\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'HeloRequest.client_protocol' )
+		yield from client_util.send_recv_done ( f'HELO {self.domain}\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+		log = logger.getChild ( 'HeloRequest.server_protocol' )
 		if not argtext:
 			raise ResponseEvent ( 501, 'missing required hostname parameter' )
 		if server.client_hostname and server.pedantic:
@@ -456,15 +410,16 @@ class HeloRequest ( Request ):
 
 
 @request_verb ( 'EHLO' )
-class EhloRequest ( Request ):
+class EhloRequest ( Request[EhloResponse] ):
+	responsecls = EhloResponse
 	
 	def __init__ ( self, domain: str ) -> None:
 		self.domain = str ( domain ).strip()
 		assert len ( self.domain ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		log = logger.getChild ( 'EhloRequest._client_protocol' )
-		yield from _client_proto_send ( f'EHLO {self.domain}\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		log = logger.getChild ( 'EhloRequest.client_protocol' )
+		yield from client_util.send ( f'EHLO {self.domain}\r\n' )
 		event = NeedDataEvent()
 		lines: List[str] = []
 		
@@ -472,7 +427,8 @@ class EhloRequest ( Request ):
 		esmtp_auth: Set[str] = set()
 		
 		while True:
-			yield from _client_proto_recv_ok ( event )
+			yield from client_util.recv_ok ( event )
+			assert isinstance ( event.response, Response )
 			tmp: Opt[Response] = event.response
 			assert tmp is not None
 			lines.append ( tmp.lines[0] )
@@ -490,7 +446,7 @@ class EhloRequest ( Request ):
 				r.esmtp_auth = esmtp_auth
 				raise r
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not argtext:
 			raise ResponseEvent ( 501, 'missing required hostname parameter' )
 		if server.client_hostname and server.pedantic:
@@ -525,15 +481,18 @@ class EhloRequest ( Request ):
 
 
 @request_verb ( 'STARTTLS' )
-class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure SMTP over Transport Layer Security
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'StartTlsRequest._client_protocol' )
-		yield from _client_proto_send_recv_ok ( 'STARTTLS\r\n' )
+class StartTlsRequest ( Request[SuccessResponse] ): # RFC3207 SMTP Service Extension for Secure SMTP over Transport Layer Security
+	responsecls = SuccessResponse
+	tls_excluded = True
+	
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'StartTlsRequest.client_protocol' )
+		yield from client_util.send_recv_ok ( 'STARTTLS\r\n' )
 		yield from ( event := StartTlsBeginEvent() ).go()
 		client.tls = True
-		yield from _client_proto_recv_done()
+		yield from client_util.recv_done()
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'StartTlsRequest._server_protocol' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
@@ -544,6 +503,7 @@ class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure S
 		yield from StartTlsBeginEvent().go()
 		
 		server.tls = True
+		server.client_hostname = '' # client must say HELO again
 		# TODO FIXME: server.reset()?
 		
 		event = GreetingAcceptEvent ( server.hostname )
@@ -554,7 +514,8 @@ class StartTlsRequest ( Request ): # RFC3207 SMTP Service Extension for Secure S
 
 
 @request_verb ( 'AUTH' )
-class _Auth ( Request ):
+class _Auth ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
 	tls_required: bool = True
 	
 	def __init__ ( self, uid: str, pwd: str ) -> None:
@@ -563,28 +524,31 @@ class _Auth ( Request ):
 		assert len ( self.uid ) > 0
 		assert len ( self.pwd ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		return super()._client_protocol ( client ) # not used
-	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
-		log = logger.getChild ( '_Auth._server_protocol' )
+	@classmethod
+	def subparse ( cls: Type[Request[SuccessResponse]],
+		server: Server,
+		argtext: str,
+	) -> Tuple[Type[Request[SuccessResponse]],str]:
+		log = logger.getChild ( '_Auth.subparse' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
-		if server.auth_mailbox:
+		if server.auth_uid:
 			raise ResponseEvent ( 503, 'already authenticated (RFC4954#4 Restrictions)' )
 		mechanism, *moreargtext = argtext.split ( ' ', 1 ) # ex: mechanism='PLAIN' moreargtext=['FUBAR']
-		#log.debug ( f'{mechanism=} {moreargtext=}' )
 		plugincls = _auth_plugins.get ( mechanism )
 		if plugincls is None:
 			raise ResponseEvent ( 504, f'Unrecognized authentication mechanism: {mechanism}' )
-		if plugincls.tls_required and not server.tls:
-			raise ResponseEvent ( 535, 'SSL/TLS connection required' )
-		plugin: _Auth = plugincls.__new__ ( plugincls ) # bypass __init__()
-		yield from plugin._server_protocol ( server, moreargtext[0] if moreargtext else '' )
+		return plugincls, moreargtext[0] if moreargtext else ''
+	
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		return super().client_protocol ( client )
+	
+	def server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
+		return super().server_protocol ( server, moreargtext )
 	
 	def _on_authenticate ( self, server: Server, uid: str, pwd: str ) -> RequestProtocolGenerator:
 		yield from ( event := AuthEvent ( uid, pwd ) ).go()
-		server.auth_mailbox = uid
+		server.auth_uid = uid
 		yield ResponseEvent ( event._code, event._message )
 
 
@@ -592,7 +556,7 @@ class _Auth ( Request ):
 class AuthPlainRequest ( _Auth ):
 	# no _client_protocol - clients should use AuthPlain1Request or AuthPlain2Request
 	
-	def _server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'AuthPlainRequest._server_protocol' )
 		try:
 			if not ( authtext := moreargtext ):
@@ -608,29 +572,29 @@ class AuthPlainRequest ( _Auth ):
 
 
 class AuthPlain1Request ( AuthPlainRequest ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'AuthPlain1Request._client_protocol' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'AuthPlain1Request.client_protocol' )
 		authtext = b64_encode_str ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
-		yield from _client_proto_send_recv_done ( f'AUTH PLAIN {authtext}\r\n' )
+		yield from client_util.send_recv_done ( f'AUTH PLAIN {authtext}\r\n' )
 
 class AuthPlain2Request ( AuthPlainRequest ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'AuthPlain2Request._client_protocol' )
-		yield from _client_proto_send_recv_ok ( 'AUTH PLAIN\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'AuthPlain2Request.client_protocol' )
+		yield from client_util.send_recv_ok ( 'AUTH PLAIN\r\n' )
 		authtext = b64_encode_str ( f'{self.uid}\0{self.uid}\0{self.pwd}' )
-		yield from _client_proto_send_recv_done ( f'{authtext}\r\n' )
+		yield from client_util.send_recv_done ( f'{authtext}\r\n' )
 
 
 @auth_plugin ( 'LOGIN' )
 class AuthLoginRequest ( _Auth ):
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'AuthLoginRequest._client_protocol' )
-		yield from _client_proto_send_recv_ok ( 'AUTH LOGIN\r\n' )
-		yield from _client_proto_send_recv_ok ( f'{b64_encode_str(self.uid)}\r\n' )
-		yield from _client_proto_send_recv_done ( f'{b64_encode_str(self.pwd)}\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'AuthLoginRequest.client_protocol' )
+		yield from client_util.send_recv_ok ( 'AUTH LOGIN\r\n' )
+		yield from client_util.send_recv_ok ( f'{b64_encode_str(self.uid)}\r\n' )
+		yield from client_util.send_recv_done ( f'{b64_encode_str(self.pwd)}\r\n' )
 	
-	def _server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, moreargtext: str ) -> RequestProtocolGenerator:
 		log = logger.getChild ( 'AuthLoginRequest._server_protocol' )
 		if moreargtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no extra parameters allowed)' )
@@ -649,33 +613,33 @@ class AuthLoginRequest ( _Auth ):
 			yield from self._on_authenticate ( server, uid, pwd )
 
 
-class ExpnVrfyRequest ( Request ):
+class ExpnVrfyRequest ( Request[ResponseType] ):
 	_verb: str
-	_response_cls: Type[ExpnVrfyResponse]
 	_event_cls: Type[ExpnVrfyEvent]
 	
 	def __init__ ( self, mailbox: str ) -> None:
 		self.mailbox = str ( mailbox ).strip()
 		assert len ( self.mailbox ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'ExpnRequest._client_protocol' )
-		yield from _client_proto_send ( f'{self._verb} {self.mailbox}\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'ExpnRequest.client_protocol' )
+		yield from client_util.send ( f'{self._verb} {self.mailbox}\r\n' )
 		event = NeedDataEvent()
 		lines: List[str] = []
 		
 		while True:
-			yield from _client_proto_recv_ok ( event )
+			yield from client_util.recv_ok ( event )
+			assert isinstance ( event.response, Response )
 			tmp: Opt[Response] = event.response
 			assert tmp is not None
 			lines.append ( tmp.lines[0] )
 			if isinstance ( tmp, SuccessResponse ):
-				raise self._response_cls ( tmp.code, *lines )
+				raise self.responsecls ( tmp.code, *lines )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # raises: ResponseEvent
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator: # raises: ResponseEvent
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
-		if not server.auth_mailbox:
+		if not server.auth_uid:
 			raise ResponseEvent ( 513, 'Must authenticate' )
 		if not argtext:
 			raise ResponseEvent ( 501, 'missing required mailbox parameter' )
@@ -691,33 +655,35 @@ class ExpnVrfyRequest ( Request ):
 
 
 @request_verb ( 'EXPN' )
-class ExpnRequest ( ExpnVrfyRequest ):
+class ExpnRequest ( ExpnVrfyRequest[ExpnResponse] ):
+	responsecls = ExpnResponse
 	_verb = 'EXPN'
-	_response_cls = ExpnResponse
 	_event_cls = ExpnEvent
 
 
 @request_verb ( 'VRFY' )
-class VrfyRequest ( ExpnVrfyRequest ):
+class VrfyRequest ( ExpnVrfyRequest[VrfyResponse] ):
+	responsecls = VrfyResponse
 	_verb = 'VRFY'
-	_response_cls = VrfyResponse
 	_event_cls = VrfyEvent
 
 
 @request_verb ( 'MAIL' )
-class MailFromRequest ( Request ):
+class MailFromRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
+	
 	def __init__ ( self, mail_from: str ) -> None:
 		self.mail_from = str ( mail_from ).strip()
 		assert len ( self.mail_from ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'MailFromRequest._client_protocol' )
-		yield from _client_proto_send_recv_done ( f'MAIL FROM:<{self.mail_from}>\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'MailFromRequest.client_protocol' )
+		yield from client_util.send_recv_done ( f'MAIL FROM:<{self.mail_from}>\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
-		if not server.auth_mailbox:
+		if not server.auth_uid:
 			raise ResponseEvent ( 513, 'Must authenticate' )
 		m = _r_mail_from.match ( argtext )
 		if not m:
@@ -732,19 +698,21 @@ class MailFromRequest ( Request ):
 
 
 @request_verb ( 'RCPT' )
-class RcptToRequest ( Request ):
+class RcptToRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
+	
 	def __init__ ( self, rcpt_to: str ) -> None:
 		self.rcpt_to = str ( rcpt_to ).strip()
 		assert len ( self.rcpt_to ) > 0
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'RcptToRequest._client_protocol' )
-		yield from _client_proto_send_recv_done ( f'RCPT TO:<{self.rcpt_to}>\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'RcptToRequest.client_protocol' )
+		yield from client_util.send_recv_done ( f'RCPT TO:<{self.rcpt_to}>\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
-		if not server.auth_mailbox:
+		if not server.auth_uid:
 			raise ResponseEvent ( 513, 'Must authenticate' )
 		m = _r_rcpt_to.match ( argtext )
 		if not m:
@@ -759,16 +727,18 @@ class RcptToRequest ( Request ):
 
 
 @request_verb ( 'DATA' )
-class DataRequest ( Request ):
+class DataRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
+	
 	# see RFC 5321 4.5.2 for byte stuffing algorithm description
 	
 	def __init__ ( self, payload: bytes ) -> None:
 		assert isinstance ( payload, bytes_types ) and len ( payload ) > 0
 		self.payload: bytes = payload # only used on client side because on server side it is accumulated in Server.data
 	
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		log = logger.getChild ( 'DataRequest._client_protocol' )
-		yield from _client_proto_send_recv_ok ( 'DATA\r\n' )
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		log = logger.getChild ( 'DataRequest.client_protocol' )
+		yield from client_util.send_recv_ok ( 'DATA\r\n' )
 		payload = memoryview ( self.payload ) # avoid data copying when we start slicing it later
 		last = 0
 		stitch = b'\r\n..'
@@ -784,15 +754,15 @@ class DataRequest ( Request ):
 		if not self.payload.endswith ( b'\r\n' ):
 			parts.append ( b'\r\n' )
 		yield from SendDataEvent ( *parts ).go()
-		yield from _client_proto_send_recv_done ( '.\r\n' )
+		yield from client_util.send_recv_done ( '.\r\n' )
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		#log = logger.getChild ( 'DataRequest._server_protocol' )
 		if not server.client_hostname and server.pedantic:
 			raise ResponseEvent ( 503, 'Say HELO first' )
 		if argtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
-		if not server.auth_mailbox:
+		if not server.auth_uid:
 			raise ResponseEvent ( 513, 'Must authenticate' )
 		if not server.mail_from:
 			raise ResponseEvent ( 503, 'no from address received yet' )
@@ -817,11 +787,13 @@ class DataRequest ( Request ):
 
 
 @request_verb ( 'RSET' )
-class RsetRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		yield from _client_proto_send_recv_done ( 'RSET\r\n' )
+class RsetRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		yield from client_util.send_recv_done ( 'RSET\r\n' )
+	
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if argtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
 		server.reset()
@@ -829,123 +801,30 @@ class RsetRequest ( Request ):
 
 
 @request_verb ( 'NOOP' )
-class NoOpRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		yield from _client_proto_send_recv_done ( 'NOOP\r\n' )
+class NoOpRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		yield from client_util.send_recv_done ( 'NOOP\r\n' )
+	
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		# FYI `argtext` is ignored per RFC 5321 4.1.1.9
 		yield ResponseEvent ( 250, 'OK' )
 
 
 @request_verb ( 'QUIT' )
-class QuitRequest ( Request ):
-	def _client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
-		#log = logger.getChild ( 'QuitRequest._client_protocol' )
-		yield from _client_proto_send_recv_done ( 'QUIT\r\n' )
+class QuitRequest ( Request[SuccessResponse] ):
+	responsecls = SuccessResponse
 	
-	def _server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
+	def client_protocol ( self, client: Client ) -> RequestProtocolGenerator:
+		#log = logger.getChild ( 'QuitRequest.client_protocol' )
+		yield from client_util.send_recv_done ( 'QUIT\r\n' )
+	
+	def server_protocol ( self, server: Server, argtext: str ) -> RequestProtocolGenerator:
 		if argtext and server.pedantic:
 			raise ResponseEvent ( 501, 'Syntax error (no parameters allowed) RFC5321#4.3.2' )
 		yield ResponseEvent ( 221, 'Closing connection' )
 		raise Closed ( 'QUIT' )
-
-#endregion
-#region COMMON ----------------------------------------------------------------
-
-class Connection ( metaclass = ABCMeta ):
-	_buf: bytes = b''
-	request: Opt[Request] = None
-	request_protocol: Opt[Generator[Event,None,None]] = None
-	need_data: Opt[NeedDataEvent] = None
-	tls: bool # whether or not the connection is currently encrypted
-	
-	def __init__ ( self, tls: bool ) -> None:
-		self.tls = tls
-	
-	def receive ( self, data: bytes ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Connection.receive' )
-		assert isinstance ( data, bytes_types ), f'invalid {data=}'
-		if not data: # EOF indicator
-			if self._buf:
-				buf, self._buf = self._buf, b''
-				yield from self._receive_line ( buf )
-				return
-			raise Closed()
-		self._buf += data
-		start = 0
-		end = 0
-		try:
-			while ( end := ( self._buf.find ( b'\n', start ) + 1 ) ):
-				line = memoryview ( self._buf )[start:end]
-				start = end
-				yield from self._receive_line ( line )
-		finally:
-			if start:
-				self._buf = self._buf[start:]
-		if len ( self._buf ) >= _MAXLINE:
-			raise ProtocolError ( 'maximum line length exceeded' )
-	
-	@abstractmethod
-	def _receive_line ( self, line: bytes ) -> Iterator[Event]:
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}._receive_line()' )
-	
-	def _run_protocol ( self ) -> Iterator[Event]:
-		log = logger.getChild ( 'Client._run_protocol' )
-		assert self.request is not None, f'invalid {self.request=}'
-		assert self.request_protocol is not None, f'invalid {self.request_protocol=}'
-		log.debug ( 'starting' )
-		try:
-			while True:
-				log.debug ( 'yielding to request protocol' )
-				event = next ( self.request_protocol )
-				log.debug ( f'{event=}' )
-				if isinstance ( event, NeedDataEvent ):
-					if self.request.response is not None:
-						log.critical ( f'INTERNAL ERROR - {self.request!r} pushed NeedDataEvent but has a response set - this can cause upstack deadlock ({self.request.response!r})' )
-						self.request.response = None
-					self.need_data = event.reset()
-					return
-				else:
-					yield event
-					if event.exc_info:
-						self.request_protocol.throw ( *event.exc_info )
-		except Closed as e:
-			#log.debug ( f'protocol indicated connection closure: {e=}' )
-			self.request = None
-			self.request_protocol = None
-			raise
-		except Response as response: # client protocol
-			#log.debug ( f'protocol finished with {response=}' )
-			self.request.response = response
-			self.request = None
-			self.request_protocol = None
-			if isinstance ( response, ErrorResponse ):
-				raise
-		except SendDataEvent as event: # server protocol
-			#log.debug ( f'protocol finished with {event=}' )
-			self.request = None
-			self.request_protocol = None
-			yield event
-		except StopIteration:
-			# client protocol *must* raise a ResponseEvent *or* set it's response attribute before exiting
-			# if not, the smtp_[a]sync.Client._recv() will get stuck waiting for data that never arrives
-			if not self.request.response and isinstance ( self, Client ):
-				log.critical (
-					f'INTERNAL ERROR:'
-					f' {type(self.request).__module__}.{type(self.request).__name__}'
-					f'._client_protocol() exit w/o response - this can cause upstack deadlock'
-				)
-				self.request.response = ErrorResponse ( 500, 'INTERNAL PROTOCOL IMPLEMENTATION ERROR' )
-			#log.debug ( f'protocol finished with {self.request.response=}' )
-			self.request = None
-			self.request_protocol = None
-		except Exception as e:
-			self.request = None
-			self.request_protocol = None
-			log.exception ( 'internal protocol error:' )
-			raise Closed ( repr ( e ) ) from e
 
 #endregion
 #region SERVER ----------------------------------------------------------------
@@ -961,10 +840,12 @@ def _auth_lines ( auth_mechanisms: Iterable[str] ) -> Seq[str]:
 		lines.append ( f'AUTH {line}' )
 	return lines
 
+_r_smtp_request = re.compile ( r'^\s*([a-z]+)(?:\s+(.*))?\s*$', re.I )
 
-class Server ( Connection ):
+
+class Server ( ServerProtocol ):
+	_MAXLINE = 8192
 	client_hostname: str = ''
-	auth_mailbox: Opt[str] = None
 	mail_from: str
 	rcpt_to: List[str]
 	data: List[bytes]
@@ -974,64 +855,55 @@ class Server ( Connection ):
 		'PIPELINING': '', # should work out of the box
 	}
 	
-	def __init__ ( self, hostname: str, tls: bool ) -> None:
-		assert isinstance ( hostname, str ) and not _r_eol.search ( hostname ), f'invalid {hostname=}'
-		self.hostname = hostname
-		super().__init__ ( tls )
+	def __init__ ( self,
+		tls: bool,
+		hostname: str,
+	) -> None:
+		super().__init__ ( tls, hostname )
 		self.reset()
 	
 	def startup ( self ) -> Iterator[Event]:
 		self.request = GreetingRequest()
-		self.request_protocol = self.request._server_protocol ( self, '' )
+		self.request_protocol = self.request.server_protocol ( self, '' )
 		yield from self._run_protocol()
-	
-	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
-		#log = logger.getChild ( 'Server._receive_line' )
-		if self.need_data:
-			self.need_data.data = line
-			self.need_data = None
-			yield from self._run_protocol()
-		else:
-			assert self.request is None, 'server internal state error - not waiting for data but a request is active'
-			verb, *argtext = map ( str.rstrip, b2s ( line ).split ( ' ', 1 ) ) # ex: verb='DATA', argtext=[] or verb='AUTH', argtext=['PLAIN XXXXXXXXXXXXX']
-			verb = verb.upper() # RFC5321#2.4 command verbs are not case-sensitive
-			requestcls = _request_verbs.get ( verb )
-			if requestcls is None:
-				yield ResponseEvent ( 500, 'Command not recognized' )
-				return
-			#try:
-			request: Request = requestcls.__new__ ( requestcls )
-			request_protocol = request._server_protocol ( self, argtext[0] if argtext else '' )
-			self.request = request
-			self.request_protocol = request_protocol
-			yield from self._run_protocol()
-			#except SendDataEvent as event: # this can happen if there's a problem parsing the command
-			#	yield event
 	
 	def reset ( self ) -> None:
 		self.mail_from = ''
 		self.rcpt_to = []
 		self.data = []
+	
+	def _parse_request_line ( self, line: BYTES ) -> Tuple[str,Opt[Type[BaseRequest]],str]:
+		log = logger.getChild ( 'Server._parse_request_line' )
+		m = _r_smtp_request.match ( b2s ( line ).rstrip() )
+		if not m:
+			#log.critical ( f'{m=} {bytes(line)=}' )
+			return '', None, ''
+		verb, suffix = m.groups()
+		verb = verb.upper() # RFC5321#2.4 command verbs are not case-sensitive
+		
+		requestcls = _request_verbs.get ( verb )
+		if requestcls is None:
+			log.debug ( f'{requestcls=} {verb=} {_request_verbs=}' )
+		else:
+			assert issubclass ( requestcls, Request )
+			requestcls, suffix = requestcls.subparse ( self, suffix )
+		
+		return '', requestcls, suffix or ''
+	
+	def _error_invalid_command ( self ) -> Event:
+		#log = logger.getChild ( 'Server._error_invalid_command' )
+		return ResponseEvent ( 500, 'Command not recognized' )
+	
+	def _error_tls_required ( self ) -> Event:
+		return ResponseEvent ( 535, 'SSL/TLS connection required' )
+	
+	def _error_tls_excluded ( self ) -> Event:
+		return ResponseEvent ( 535, 'Command not available in SSL/TLS' )
 
 #endregion
 #region CLIENT ----------------------------------------------------------------
 
-class Client ( Connection ):
-	
-	def send ( self, request: Request ) -> Iterator[Event]:
-		log = logger.getChild ( 'Client.send' )
-		assert self.request is None, f'trying to send {request=} but not finished processing {self.request=}'
-		self.request = request
-		self.request_protocol = request._client_protocol ( self )
-		#log.debug ( f'set {self.request=}' )
-		yield from self._run_protocol()
-	
-	def _receive_line ( self, line: BYTES ) -> Iterator[Event]:
-		log = logger.getChild ( 'Client._receive_line' )
-		
-		assert self.need_data, f'not expecting data at this time ({bytes(line)!r})'
-		self.need_data.data = line
-		self.need_data = None
-		yield from self._run_protocol()
+class Client ( ClientProtocol ):
+	_MAXLINE = Server._MAXLINE
 
 #endregion

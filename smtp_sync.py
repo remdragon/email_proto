@@ -4,103 +4,68 @@ import logging
 import sys
 
 # email_proto imports:
+from event_handling import SyncClient, SyncServer
 import smtp_proto as proto
-from transports import SyncTransport
+from transport import SyncTransport
 from util import b2s
 
 logger = logging.getLogger ( __name__ )
 
 
-class Client ( SyncTransport ):
-	cli: proto.Client
-	
-	def _connect ( self, tls: bool ) -> proto.SuccessResponse:
-		self.cli = proto.Client ( tls )
-		return self.greeting()
+class Client ( SyncClient ):
+	protocls = proto.Client
 	
 	def greeting ( self ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.GreetingRequest() )
+		return self._request ( proto.GreetingRequest() )
 	
 	def helo ( self, local_hostname: str ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.HeloRequest ( local_hostname ) )
+		return self._request ( proto.HeloRequest ( local_hostname ) )
 	
 	def ehlo ( self, local_hostname: str ) -> proto.EhloResponse:
-		r = self._send_recv ( proto.EhloRequest ( local_hostname ) )
-		assert isinstance ( r, proto.EhloResponse ), f'invalid {r=}'
-		return r
+		return self._request ( proto.EhloRequest ( local_hostname ) )
 	
 	def starttls ( self ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.StartTlsRequest() )
+		return self._request ( proto.StartTlsRequest() )
 	
 	def auth_plain1 ( self, uid: str, pwd: str ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.AuthPlain1Request ( uid, pwd ) )
+		return self._request ( proto.AuthPlain1Request ( uid, pwd ) )
 	
 	def auth_plain2 ( self, uid: str, pwd: str ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.AuthPlain2Request ( uid, pwd ) )
+		return self._request ( proto.AuthPlain2Request ( uid, pwd ) )
 	
 	def auth_login ( self, uid: str, pwd: str ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.AuthLoginRequest ( uid, pwd ) )
+		return self._request ( proto.AuthLoginRequest ( uid, pwd ) )
 	
 	def expn ( self, mailbox: str ) -> proto.ExpnResponse:
-		r = self._send_recv ( proto.ExpnRequest ( mailbox ) )
-		assert isinstance ( r, proto.ExpnResponse )
-		return r
+		return self._request ( proto.ExpnRequest ( mailbox ) )
 	
 	def vrfy ( self, mailbox: str ) -> proto.VrfyResponse:
-		r = self._send_recv ( proto.VrfyRequest ( mailbox ) )
-		assert isinstance ( r, proto.VrfyResponse )
-		return r
+		return self._request ( proto.VrfyRequest ( mailbox ) )
 	
 	def mail_from ( self, email: str ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.MailFromRequest ( email ) )
+		return self._request ( proto.MailFromRequest ( email ) )
 	
 	def rcpt_to ( self, email: str ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.RcptToRequest ( email ) )
+		return self._request ( proto.RcptToRequest ( email ) )
 	
 	def data ( self, content: bytes ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.DataRequest ( content ) )
+		return self._request ( proto.DataRequest ( content ) )
 	
 	def rset ( self ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.RsetRequest() )
+		return self._request ( proto.RsetRequest() )
 	
 	def noop ( self ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.NoOpRequest() )
+		return self._request ( proto.NoOpRequest() )
 	
 	def quit ( self ) -> proto.SuccessResponse:
-		return self._send_recv ( proto.QuitRequest() )
+		return self._request ( proto.QuitRequest() )
 	
-	def on_SendDataEvent ( self, event: proto.SendDataEvent ) -> None:
-		log = logger.getChild ( 'Client.on_SendDataEvent' )
-		for chunk in event.chunks:
-			log.debug ( f'S>{b2s(chunk).rstrip()}' )
-			self._write ( chunk )
-	
-	def _recv ( self, request: proto.Request ) -> proto.SuccessResponse:
-		log = logger.getChild ( 'Client._recv' )
-		while not request.response:
-			data: bytes = self._read()
-			log.debug ( f'S>{b2s(data).rstrip()}' )
-			for event in self.cli.receive ( data ):
-				self._on_event ( event )
-		assert isinstance ( request.response, proto.SuccessResponse )
-		return request.response
-	
-	def _send_recv ( self, request: proto.Request ) -> proto.SuccessResponse:
-		log = logger.getChild ( 'Client._send_recv' )
-		for event in self.cli.send ( request ):
-			self._on_event ( event )
-		return self._recv ( request )
-	
-	@abstractmethod
-	def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None: # pragma: no cover
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsBeginEvent()' )
+	def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None:
+		self.transport.starttls_client ( self.server_hostname )
 
 
-class Server ( SyncTransport ):
-	
-	def __init__ ( self, hostname: str ) -> None:
-		self.hostname = hostname
+class Server ( SyncServer ):
+	protocls = proto.Server
 	
 	def on_GreetingAcceptEvent ( self, event: proto.GreetingAcceptEvent ) -> None:
 		# implementations only need to override this if they want to change the behavior
@@ -119,10 +84,8 @@ class Server ( SyncTransport ):
 		cls = type ( self )
 		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsAcceptEvent()' )
 	
-	@abstractmethod
 	def on_StartTlsBeginEvent ( self, event: proto.StartTlsBeginEvent ) -> None: # pragma: no cover
-		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_StartTlsBeginEvent()' )
+		self.transport.starttls_server()
 	
 	@abstractmethod
 	def on_AuthEvent ( self, event: proto.AuthEvent ) -> None: # pragma: no cover
@@ -148,31 +111,4 @@ class Server ( SyncTransport ):
 	@abstractmethod
 	def on_CompleteEvent ( self, event: proto.CompleteEvent ) -> None: # pragma: no cover
 		cls = type ( self )
-		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_complete()' )
-	
-	def on_SendDataEvent ( self, event: proto.SendDataEvent ) -> None:
-		log = logger.getChild ( 'Server.on_SendDataEvent' )
-		for chunk in event.chunks:
-			log.debug ( f'S>{b2s(chunk).rstrip()}' )
-			self._write ( chunk )
-	
-	def _run ( self, tls: bool ) -> None:
-		log = logger.getChild ( 'Server._run' )
-		try:
-			srv = proto.Server ( self.hostname, tls )
-			
-			for event in srv.startup():
-				self._on_event ( event )
-			
-			while True:
-				try:
-					data = self._read()
-				except OSError as e: # TODO FIXME: more specific exception?
-					raise proto.Closed ( repr ( e ) ) from e
-				log.debug ( f'C>{b2s(data).rstrip()}' )
-				for event in srv.receive ( data ):
-					self._on_event ( event )
-		except proto.Closed as e:
-			log.debug ( f'connection closed with reason: {e.args[0]!r}' )
-		finally:
-			self.close()
+		raise NotImplementedError ( f'{cls.__module__}.{cls.__name__}.on_CompleteEvent()' )

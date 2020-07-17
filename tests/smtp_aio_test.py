@@ -23,12 +23,12 @@ class Tests ( unittest.TestCase ):
 			async def client_task ( sock: socket.socket ) -> None:
 				log = logger.getChild ( 'main.client_task' )
 				rx, tx = await asyncio.open_connection ( sock = sock )
-				cli = smtp_aio.Client()
+				xport = smtp_aio.Transport ( rx, tx )
+				tls = True
+				cli = smtp_aio.Client ( xport, tls, 'milliways.local' )
 				try:
-					cli.rx, cli.tx = rx, tx
-					
 					test.assertEqual (
-						repr ( await cli._connect ( True ) ),
+						repr ( await cli.greeting() ),
 						"smtp_proto.SuccessResponse(220, 'milliways.local ESMTP')",
 					)
 					
@@ -89,7 +89,6 @@ class Tests ( unittest.TestCase ):
 			
 			async def server_task ( sock: socket.socket ) -> None:
 				log = logger.getChild ( 'main.server_task' )
-				rx, tx = await asyncio.open_connection ( sock = sock )
 				class TestServer ( smtp_aio.Server ):
 					async def on_StartTlsAcceptEvent ( self, event: smtp_proto.StartTlsAcceptEvent ) -> None:
 						event.reject() # not ready yet
@@ -123,10 +122,13 @@ class Tests ( unittest.TestCase ):
 							test.assertEqual ( lines[9], b'?????' )
 						event.accept() # or .reject()
 				
-				srv = TestServer ( 'milliways.local' )
+				rx, tx = await asyncio.open_connection ( sock = sock )
+				xport = smtp_aio.Transport ( rx, tx )
+				tls = True
+				srv = TestServer ( xport, tls, 'milliways.local' )
 				
 				try:
-					await srv.run ( rx, tx, True )
+					await srv.run()
 				except smtp_proto.Closed:
 					pass
 				finally:
